@@ -1,0 +1,110 @@
+# Données lourdes
+Data/
+dataset/
+datasets/
+raw_data/
+processed_data/
+
+# Fichiers de données
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.jsonl
+*.h5
+*.hdf5
+
+# Modèles / résultats / logs
+models/
+checkpoints/
+outputs/
+results/
+runs/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.joblib
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Système
+.DS_Store
+Thumbs.db
+
+# Secrets / configs privées
+.env
+*.key
+*.pem
+credentials.json
+secrets.json
+# Environnements Python, même s'ils sont dans des sous-dossiers
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+
+# Données / datasets
+Data/
+data/
+dataset/
+datasets/
+**/Data/
+**/data/
+**/dataset/
+**/datasets/
+
+# Fichiers audio / datasets lourds
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Fichiers de données fréquents
+*.csv
+*.tsv
+*.xlsx
+*.parquet
+*.jsonl
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Modèles / résultats / sorties
+models/
+checkpoints/
+outputs/
+results/
+runs/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+
+# Archives lourdes
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Système
+.DS_Store
+Thumbs.db

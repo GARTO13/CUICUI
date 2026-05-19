@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biosound-cluster"
+version = "0.1.0"
+description = "Unsupervised acoustic event detection, embedding, clustering, and export for bioacoustic review."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "biosound-cluster contributors" }
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "librosa",
+  "soundfile",
+  "scikit-learn",
+  "umap-learn",
+  "hdbscan",
+  "matplotlib",
+  "typer",
+  "rich",
+]
+
+[project.scripts]
+biosound-cluster = "biosound_cluster.cli:main"
+biosound-evaluate-dcase = "biosound_cluster.evaluation.cli:main"
+biosound-tune-dcase = "biosound_cluster.evaluation.cli:tune_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
