@@ -239,7 +239,8 @@ Useful environment variables:
 BIOSOUND_API_HOST=127.0.0.1
 BIOSOUND_API_PORT=8000
 BIOSOUND_API_ROOT=outputs/api_jobs
-BIOSOUND_API_MAX_UPLOAD_MB=2048
+BIOSOUND_API_MAX_UPLOAD_MB=5120
+BIOSOUND_API_MAX_CHUNK_MB=50
 BIOSOUND_API_WORKERS=1
 BIOSOUND_API_CORS_ORIGINS="*"
 ```
@@ -272,6 +273,8 @@ Long-audio safeguards:
 - uploads are streamed to disk in chunks;
 - only `.wav` files with a RIFF/WAVE header are accepted;
 - upload size is capped by `BIOSOUND_API_MAX_UPLOAD_MB`;
+- large recordings can be uploaded with `/api/uploads/init`, `/api/uploads/{upload_id}/chunks/{chunk_index}`,
+  and `/api/uploads/{upload_id}/complete` to avoid proxy limits around 100 MB per request;
 - processing runs asynchronously in a bounded worker pool;
 - generated files are served only from the job output folder;
 - each clip keeps a JSON metadata sidecar with recording time, cut timing, sensor metadata, and

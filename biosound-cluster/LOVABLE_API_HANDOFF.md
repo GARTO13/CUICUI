@@ -5,13 +5,13 @@ Ce document donne les informations à utiliser dans Lovable pour connecter le si
 ## URL De Base Actuelle
 
 ```text
-https://alpha-admission-distances-pest.trycloudflare.com
+https://minister-tulsa-tones-pennsylvania.trycloudflare.com
 ```
 
 Health check :
 
 ```text
-https://alpha-admission-distances-pest.trycloudflare.com/health
+https://minister-tulsa-tones-pennsylvania.trycloudflare.com/health
 ```
 
 Réponse attendue :
@@ -19,7 +19,8 @@ Réponse attendue :
 ```json
 {
   "status": "ok",
-  "max_upload_mb": 2048,
+  "max_upload_mb": 5120,
+  "max_chunk_mb": 50,
   "workers": 1,
   "api_root": "outputs/api_jobs"
 }
@@ -41,7 +42,11 @@ Pour une mise en production, ajouter une authentification, des quotas et un doma
 
 ## Workflow Frontend
 
-Le frontend doit suivre ce flux :
+Pour les fichiers courts, le frontend peut utiliser `POST /api/jobs` directement.
+
+Pour les fichiers longs ou lourds, par exemple 2-3 Go, le frontend doit utiliser l'upload par chunks. Ne pas essayer d'envoyer 2-3 Go en un seul `POST /api/jobs`, car les tunnels/proxys comme Cloudflare peuvent bloquer les requêtes autour de 100 Mo.
+
+Le workflow recommandé est donc :
 
 1. L'utilisateur sélectionne un fichier audio `.wav`.
 2. L'utilisateur remplit les métadonnées :
@@ -52,11 +57,16 @@ Le frontend doit suivre ce flux :
    - type d'environnement ;
    - heure de début de l'enregistrement ;
    - timezone.
-3. Le frontend envoie un `POST /api/jobs` en `multipart/form-data`.
-4. L'API renvoie un `job_id`.
-5. Le frontend poll `GET /api/jobs/{job_id}` jusqu'à `status: "done"` ou `status: "failed"`.
-6. Quand le job est terminé, le frontend appelle `GET /api/jobs/{job_id}/result`.
-7. Le frontend affiche :
+3. Si le fichier fait moins de 50 Mo, le frontend peut appeler `POST /api/jobs`.
+4. Si le fichier fait plus de 50 Mo, le frontend doit :
+   - appeler `POST /api/uploads/init` ;
+   - découper le fichier en chunks de 25 à 50 Mo côté navigateur ;
+   - envoyer chaque chunk à `POST /api/uploads/{upload_id}/chunks/{chunk_index}` ;
+   - appeler `POST /api/uploads/{upload_id}/complete` avec les métadonnées.
+5. L'API renvoie un `job_id`.
+6. Le frontend poll `GET /api/jobs/{job_id}` jusqu'à `status: "done"` ou `status: "failed"`.
+7. Quand le job est terminé, le frontend appelle `GET /api/jobs/{job_id}/result`.
+8. Le frontend affiche :
    - les clusters ;
    - les audios associés ;
    - les spectrogrammes ;
@@ -74,10 +84,12 @@ GET /health
 URL complète :
 
 ```text
-https://alpha-admission-distances-pest.trycloudflare.com/health
+https://minister-tulsa-tones-pennsylvania.trycloudflare.com/health
 ```
 
 ### 2. Créer Un Job
+
+À utiliser seulement pour des fichiers raisonnablement petits.
 
 ```http
 POST /api/jobs
@@ -87,7 +99,7 @@ Content-Type: multipart/form-data
 URL complète :
 
 ```text
-https://alpha-admission-distances-pest.trycloudflare.com/api/jobs
+https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/jobs
 ```
 
 Champs `multipart/form-data` :
@@ -115,8 +127,98 @@ Exemple de réponse :
 {
   "job_id": "9f734fa93f7743a7b90f814a6f3a6a35",
   "status": "queued",
-  "status_url": "https://alpha-admission-distances-pest.trycloudflare.com/api/jobs/9f734fa93f7743a7b90f814a6f3a6a35",
-  "result_url": "https://alpha-admission-distances-pest.trycloudflare.com/api/jobs/9f734fa93f7743a7b90f814a6f3a6a35/result"
+  "status_url": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/jobs/9f734fa93f7743a7b90f814a6f3a6a35",
+  "result_url": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/jobs/9f734fa93f7743a7b90f814a6f3a6a35/result"
+}
+```
+
+### 2B. Upload Par Chunks Pour Gros Fichiers
+
+À utiliser pour les fichiers de 2-3 Go.
+
+#### Initialiser L'Upload
+
+```http
+POST /api/uploads/init
+Content-Type: multipart/form-data
+```
+
+Champs :
+
+```text
+filename            nom du fichier .wav
+total_size_bytes    taille totale du fichier en octets
+```
+
+Réponse :
+
+```json
+{
+  "upload_id": "925651b9c12e4f0d84b37c19f8d9cf59",
+  "max_chunk_mb": 50,
+  "chunk_url_template": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/uploads/925651b9c12e4f0d84b37c19f8d9cf59/chunks/{chunk_index}",
+  "complete_url": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/uploads/925651b9c12e4f0d84b37c19f8d9cf59/complete"
+}
+```
+
+#### Envoyer Chaque Chunk
+
+```http
+POST /api/uploads/{upload_id}/chunks/{chunk_index}
+Content-Type: multipart/form-data
+```
+
+Champs :
+
+```text
+file    blob/chunk du fichier audio
+```
+
+`chunk_index` commence à `0`.
+
+Réponse :
+
+```json
+{
+  "upload_id": "925651b9c12e4f0d84b37c19f8d9cf59",
+  "chunk_index": 0,
+  "size_bytes": 52428800
+}
+```
+
+#### Finaliser Et Lancer Le Traitement
+
+```http
+POST /api/uploads/{upload_id}/complete
+Content-Type: multipart/form-data
+```
+
+Envoyer les mêmes métadonnées que pour `POST /api/jobs` :
+
+```text
+sensor_id
+sensor_latitude
+sensor_longitude
+sensor_elevation_m
+environment_type
+recording_start_time
+recording_timezone
+sample_rate
+min_cluster_size
+max_events
+generate_spectrograms
+enable_polyphony_handling
+enable_clusterability_filtering
+```
+
+Réponse :
+
+```json
+{
+  "job_id": "81876fce0f554c0c81b45f836653ad3a",
+  "status": "queued",
+  "status_url": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/jobs/81876fce0f554c0c81b45f836653ad3a",
+  "result_url": "https://minister-tulsa-tones-pennsylvania.trycloudflare.com/api/jobs/81876fce0f554c0c81b45f836653ad3a/result"
 }
 ```
 
@@ -241,7 +343,7 @@ metadata_url
 Connecte le frontend à cette API FastAPI :
 
 Base URL:
-https://alpha-admission-distances-pest.trycloudflare.com
+https://minister-tulsa-tones-pennsylvania.trycloudflare.com
 
 L'application doit permettre d'uploader un fichier audio .wav avec des métadonnées :
 - sensor_id
@@ -252,7 +354,15 @@ L'application doit permettre d'uploader un fichier audio .wav avec des métadonn
 - recording_start_time
 - recording_timezone
 
-Créer un job avec POST /api/jobs en multipart/form-data.
+Pour les fichiers de moins de 50 Mo, créer un job avec POST /api/jobs en multipart/form-data.
+
+Pour les gros fichiers, notamment 2-3 Go, ne pas utiliser un upload unique.
+Utiliser l'upload par chunks :
+1. POST /api/uploads/init avec filename et total_size_bytes.
+2. Découper le fichier côté navigateur en chunks de 25 à 50 Mo.
+3. Envoyer chaque chunk avec POST /api/uploads/{upload_id}/chunks/{chunk_index}.
+4. Appeler POST /api/uploads/{upload_id}/complete avec les métadonnées.
+
 Après la réponse, stocker job_id, puis poller GET /api/jobs/{job_id} toutes les 3 à 5 secondes.
 Quand status vaut "done", appeler GET /api/jobs/{job_id}/result.
 

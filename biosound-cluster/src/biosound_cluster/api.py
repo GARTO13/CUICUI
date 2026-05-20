@@ -22,18 +22,20 @@ from biosound_cluster.pipeline import process_audio_file
 try:  # FastAPI is a runtime dependency for the API, but keep module helpers importable.
     from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, JSONResponse
 except ImportError:  # pragma: no cover - exercised only before API deps are installed
     FastAPI = None  # type: ignore[assignment]
     File = Form = Header = HTTPException = Request = UploadFile = None  # type: ignore[assignment]
     CORSMiddleware = None  # type: ignore[assignment]
-    FileResponse = None  # type: ignore[assignment]
+    FileResponse = JSONResponse = None  # type: ignore[assignment]
 
 LOGGER = get_logger(__name__)
 
 API_ROOT = Path(os.environ.get("BIOSOUND_API_ROOT", "outputs/api_jobs"))
 MAX_UPLOAD_MB = int(os.environ.get("BIOSOUND_API_MAX_UPLOAD_MB", "2048"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+MAX_CHUNK_MB = int(os.environ.get("BIOSOUND_API_MAX_CHUNK_MB", "50"))
+MAX_CHUNK_BYTES = MAX_CHUNK_MB * 1024 * 1024
 MAX_WORKERS = int(os.environ.get("BIOSOUND_API_WORKERS", "1"))
 CHUNK_SIZE = 1024 * 1024
 
@@ -71,20 +73,17 @@ def create_app() -> Any:
         version="0.1.0",
         description="Upload WAV recordings with metadata and retrieve unsupervised acoustic clusters.",
     )
-    origins = _cors_origins()
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> Any:
+        LOGGER.exception("Unhandled API error for %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error", "error": str(exc)})
 
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "max_upload_mb": MAX_UPLOAD_MB,
+            "max_chunk_mb": MAX_CHUNK_MB,
             "workers": MAX_WORKERS,
             "api_root": str(API_ROOT),
         }
@@ -95,18 +94,18 @@ def create_app() -> Any:
         file: UploadFile = File(...),
         content_length: int | None = Header(None),
         sensor_id: str | None = Form(None),
-        sensor_latitude: float | None = Form(None),
-        sensor_longitude: float | None = Form(None),
-        sensor_elevation_m: float | None = Form(None),
+        sensor_latitude: str | None = Form(None),
+        sensor_longitude: str | None = Form(None),
+        sensor_elevation_m: str | None = Form(None),
         environment_type: str | None = Form(None),
         recording_start_time: str | None = Form(None),
         recording_timezone: str | None = Form(None),
-        sample_rate: int = Form(32000),
-        min_cluster_size: int = Form(10),
-        max_events: int | None = Form(None),
-        generate_spectrograms: bool = Form(True),
-        enable_polyphony_handling: bool = Form(True),
-        enable_clusterability_filtering: bool = Form(True),
+        sample_rate: str = Form("32000"),
+        min_cluster_size: str = Form("10"),
+        max_events: str | None = Form(None),
+        generate_spectrograms: str = Form("true"),
+        enable_polyphony_handling: str = Form("true"),
+        enable_clusterability_filtering: str = Form("true"),
     ) -> dict[str, Any]:
         """Upload one WAV file and start asynchronous processing."""
         if content_length is not None and content_length > MAX_UPLOAD_BYTES:
@@ -128,40 +127,147 @@ def create_app() -> Any:
             shutil.rmtree(job_root, ignore_errors=True)
             raise
 
-        metadata = {
-            "sensor_id": sensor_id,
-            "sensor_latitude": sensor_latitude,
-            "sensor_longitude": sensor_longitude,
-            "sensor_elevation_m": sensor_elevation_m,
-            "environment_type": environment_type,
-            "recording_start_time": recording_start_time,
-            "recording_timezone": recording_timezone,
-            "saved_size_bytes": saved_size,
-            "original_filename": file.filename,
-        }
-        config_values = {
-            "sample_rate": sample_rate,
-            "min_cluster_size": min_cluster_size,
-            "max_events": max_events,
-            "generate_spectrograms": generate_spectrograms,
-            "export_clips": True,
-            "enable_polyphony_handling": enable_polyphony_handling,
-            "enable_clusterability_filtering": enable_clusterability_filtering,
-            **metadata,
-        }
-        config = BioSoundConfig(**config_values)
-        job = ApiJob(
-            job_id=job_id,
-            status="queued",
-            created_at=_now_iso(),
-            updated_at=_now_iso(),
-            input_path=str(input_path),
-            output_dir=str(output_dir),
-            metadata={"request": metadata, "config": config_to_dict(config)},
+        config, metadata = _build_config(
+            original_filename=file.filename,
+            saved_size_bytes=saved_size,
+            sensor_id=sensor_id,
+            sensor_latitude=sensor_latitude,
+            sensor_longitude=sensor_longitude,
+            sensor_elevation_m=sensor_elevation_m,
+            environment_type=environment_type,
+            recording_start_time=recording_start_time,
+            recording_timezone=recording_timezone,
+            sample_rate=sample_rate,
+            min_cluster_size=min_cluster_size,
+            max_events=max_events,
+            generate_spectrograms=generate_spectrograms,
+            enable_polyphony_handling=enable_polyphony_handling,
+            enable_clusterability_filtering=enable_clusterability_filtering,
         )
-        _store_job(job)
-        _executor.submit(_run_job, job_id, input_path, output_dir, config)
+        job = _create_processing_job(job_id, input_path, output_dir, metadata, config)
 
+        return {
+            "job_id": job_id,
+            "status": job.status,
+            "status_url": str(request.url_for("get_job", job_id=job_id)),
+            "result_url": str(request.url_for("get_job_result", job_id=job_id)),
+        }
+
+    @app.post("/api/uploads/init", status_code=201)
+    async def init_chunked_upload(
+        request: Request,
+        filename: str = Form(...),
+        total_size_bytes: str | None = Form(None),
+    ) -> dict[str, Any]:
+        """Create a chunked upload session for recordings too large for one request."""
+        if not filename.lower().endswith(".wav"):
+            raise HTTPException(status_code=400, detail="Only .wav uploads are accepted.")
+        total_size = _optional_int(total_size_bytes, "total_size_bytes")
+        if total_size is not None and total_size > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"Upload too large. Limit is {MAX_UPLOAD_MB} MB.")
+
+        upload_id = uuid.uuid4().hex
+        upload_root = API_ROOT / "chunked_uploads" / upload_id
+        chunks_dir = upload_root / "chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=False)
+        metadata = {
+            "upload_id": upload_id,
+            "filename": _sanitize_filename(filename),
+            "original_filename": filename,
+            "total_size_bytes": total_size,
+            "created_at": _now_iso(),
+        }
+        (upload_root / "upload.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        return {
+            "upload_id": upload_id,
+            "max_chunk_mb": MAX_CHUNK_MB,
+            "chunk_url_template": str(request.url_for("upload_chunk", upload_id=upload_id, chunk_index=0)).replace(
+                "/0", "/{chunk_index}"
+            ),
+            "complete_url": str(request.url_for("complete_chunked_upload", upload_id=upload_id)),
+        }
+
+    @app.post("/api/uploads/{upload_id}/chunks/{chunk_index}", name="upload_chunk")
+    async def upload_chunk(
+        upload_id: str,
+        chunk_index: int,
+        file: UploadFile = File(...),
+        content_length: int | None = Header(None),
+    ) -> dict[str, Any]:
+        """Upload one chunk for a chunked upload session."""
+        if chunk_index < 0:
+            raise HTTPException(status_code=400, detail="chunk_index must be non-negative.")
+        if content_length is not None and content_length > MAX_CHUNK_BYTES:
+            raise HTTPException(status_code=413, detail=f"Chunk too large. Limit is {MAX_CHUNK_MB} MB.")
+        upload_root = _chunked_upload_root(upload_id)
+        chunks_dir = upload_root / "chunks"
+        path = chunks_dir / f"{chunk_index:08d}.part"
+        size = await _save_chunk_file(file, path)
+        return {"upload_id": upload_id, "chunk_index": chunk_index, "size_bytes": size}
+
+    @app.post("/api/uploads/{upload_id}/complete", name="complete_chunked_upload", status_code=202)
+    async def complete_chunked_upload(
+        upload_id: str,
+        request: Request,
+        sensor_id: str | None = Form(None),
+        sensor_latitude: str | None = Form(None),
+        sensor_longitude: str | None = Form(None),
+        sensor_elevation_m: str | None = Form(None),
+        environment_type: str | None = Form(None),
+        recording_start_time: str | None = Form(None),
+        recording_timezone: str | None = Form(None),
+        sample_rate: str = Form("32000"),
+        min_cluster_size: str = Form("10"),
+        max_events: str | None = Form(None),
+        generate_spectrograms: str = Form("true"),
+        enable_polyphony_handling: str = Form("true"),
+        enable_clusterability_filtering: str = Form("true"),
+    ) -> dict[str, Any]:
+        """Assemble uploaded chunks and start asynchronous processing."""
+        upload_root = _chunked_upload_root(upload_id)
+        upload_metadata = _read_json(upload_root / "upload.json")
+        chunks = sorted((upload_root / "chunks").glob("*.part"))
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No chunks uploaded.")
+
+        job_id = uuid.uuid4().hex
+        job_root = API_ROOT / job_id
+        upload_dir = job_root / "upload"
+        output_dir = job_root / "run"
+        upload_dir.mkdir(parents=True, exist_ok=False)
+        input_path = upload_dir / str(upload_metadata.get("filename") or "input.wav")
+        saved_size = _assemble_chunks(chunks, input_path)
+        expected_size = upload_metadata.get("total_size_bytes")
+        if isinstance(expected_size, int) and expected_size != saved_size:
+            shutil.rmtree(job_root, ignore_errors=True)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Assembled size mismatch: expected {expected_size}, got {saved_size}.",
+            )
+        if not _file_looks_like_wav(input_path):
+            shutil.rmtree(job_root, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="Assembled file does not look like a RIFF/WAVE file.")
+
+        config, metadata = _build_config(
+            original_filename=str(upload_metadata.get("original_filename") or input_path.name),
+            saved_size_bytes=saved_size,
+            sensor_id=sensor_id,
+            sensor_latitude=sensor_latitude,
+            sensor_longitude=sensor_longitude,
+            sensor_elevation_m=sensor_elevation_m,
+            environment_type=environment_type,
+            recording_start_time=recording_start_time,
+            recording_timezone=recording_timezone,
+            sample_rate=sample_rate,
+            min_cluster_size=min_cluster_size,
+            max_events=max_events,
+            generate_spectrograms=generate_spectrograms,
+            enable_polyphony_handling=enable_polyphony_handling,
+            enable_clusterability_filtering=enable_clusterability_filtering,
+        )
+        metadata["chunked_upload_id"] = upload_id
+        job = _create_processing_job(job_id, input_path, output_dir, metadata, config)
+        shutil.rmtree(upload_root, ignore_errors=True)
         return {
             "job_id": job_id,
             "status": job.status,
@@ -228,6 +334,123 @@ async def _save_upload_file(file: Any, path: Path) -> int:
     if total == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     return total
+
+
+async def _save_chunk_file(file: Any, path: Path) -> int:
+    """Save one chunk to disk without assuming it is a complete WAV file."""
+    total = 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        while True:
+            chunk = await file.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_CHUNK_BYTES:
+                path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=f"Chunk too large. Limit is {MAX_CHUNK_MB} MB.")
+            handle.write(chunk)
+    if total == 0:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Uploaded chunk is empty.")
+    return total
+
+
+def _assemble_chunks(chunks: list[Path], output_path: Path) -> int:
+    """Concatenate uploaded chunk files into one WAV file without loading it into memory."""
+    total = 0
+    with output_path.open("wb") as destination:
+        for chunk_path in chunks:
+            with chunk_path.open("rb") as source:
+                while True:
+                    data = source.read(CHUNK_SIZE)
+                    if not data:
+                        break
+                    total += len(data)
+                    if total > MAX_UPLOAD_BYTES:
+                        output_path.unlink(missing_ok=True)
+                        raise HTTPException(status_code=413, detail=f"Upload too large. Limit is {MAX_UPLOAD_MB} MB.")
+                    destination.write(data)
+    return total
+
+
+def _file_looks_like_wav(path: Path) -> bool:
+    with path.open("rb") as handle:
+        return _looks_like_wav(handle.read(16))
+
+
+def _create_processing_job(
+    job_id: str,
+    input_path: Path,
+    output_dir: Path,
+    metadata: dict[str, Any],
+    config: BioSoundConfig,
+) -> ApiJob:
+    job = ApiJob(
+        job_id=job_id,
+        status="queued",
+        created_at=_now_iso(),
+        updated_at=_now_iso(),
+        input_path=str(input_path),
+        output_dir=str(output_dir),
+        metadata={"request": metadata, "config": config_to_dict(config)},
+    )
+    _store_job(job)
+    _executor.submit(_run_job, job_id, input_path, output_dir, config)
+    return job
+
+
+def _build_config(
+    *,
+    original_filename: str,
+    saved_size_bytes: int,
+    sensor_id: str | None,
+    sensor_latitude: str | None,
+    sensor_longitude: str | None,
+    sensor_elevation_m: str | None,
+    environment_type: str | None,
+    recording_start_time: str | None,
+    recording_timezone: str | None,
+    sample_rate: str,
+    min_cluster_size: str,
+    max_events: str | None,
+    generate_spectrograms: str,
+    enable_polyphony_handling: str,
+    enable_clusterability_filtering: str,
+) -> tuple[BioSoundConfig, dict[str, Any]]:
+    metadata = {
+        "sensor_id": _blank_to_none(sensor_id),
+        "sensor_latitude": _optional_float(sensor_latitude, "sensor_latitude"),
+        "sensor_longitude": _optional_float(sensor_longitude, "sensor_longitude"),
+        "sensor_elevation_m": _optional_float(sensor_elevation_m, "sensor_elevation_m"),
+        "environment_type": _blank_to_none(environment_type),
+        "recording_start_time": _blank_to_none(recording_start_time),
+        "recording_timezone": _blank_to_none(recording_timezone),
+        "saved_size_bytes": saved_size_bytes,
+        "original_filename": original_filename,
+    }
+    config_values = {
+        "sample_rate": _required_int(sample_rate, "sample_rate"),
+        "min_cluster_size": _required_int(min_cluster_size, "min_cluster_size"),
+        "max_events": _optional_int(max_events, "max_events"),
+        "generate_spectrograms": _parse_bool(generate_spectrograms, "generate_spectrograms"),
+        "export_clips": True,
+        "enable_polyphony_handling": _parse_bool(enable_polyphony_handling, "enable_polyphony_handling"),
+        "enable_clusterability_filtering": _parse_bool(
+            enable_clusterability_filtering, "enable_clusterability_filtering"
+        ),
+        "sensor_id": metadata["sensor_id"],
+        "sensor_latitude": metadata["sensor_latitude"],
+        "sensor_longitude": metadata["sensor_longitude"],
+        "sensor_elevation_m": metadata["sensor_elevation_m"],
+        "environment_type": metadata["environment_type"],
+        "recording_start_time": metadata["recording_start_time"],
+        "recording_timezone": metadata["recording_timezone"],
+    }
+    try:
+        return BioSoundConfig(**config_values), metadata
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _run_job(job_id: str, input_path: Path, output_dir: Path, config: BioSoundConfig) -> None:
@@ -380,6 +603,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def _chunked_upload_root(upload_id: str) -> Path:
+    if not upload_id or not all(char.isalnum() for char in upload_id):
+        raise HTTPException(status_code=404, detail="Upload not found.")
+    root = (API_ROOT / "chunked_uploads" / upload_id).resolve()
+    uploads_root = (API_ROOT / "chunked_uploads").resolve()
+    if not _is_relative_to(root, uploads_root) or not root.is_dir():
+        raise HTTPException(status_code=404, detail="Upload not found.")
+    return root
+
+
 def _safe_output_file(output_dir: Path, file_path: str) -> Path:
     root = output_dir.resolve()
     target = (root / file_path).resolve()
@@ -420,6 +653,52 @@ def _sanitize_filename(filename: str) -> str:
     return safe
 
 
+def _blank_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _optional_float(value: str | None, field_name: str) -> float | None:
+    value = _blank_to_none(value)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a number.") from exc
+
+
+def _required_int(value: str, field_name: str) -> int:
+    value = _blank_to_none(value)
+    if value is None:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required.")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be an integer.") from exc
+
+
+def _optional_int(value: str | None, field_name: str) -> int | None:
+    value = _blank_to_none(value)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be an integer.") from exc
+
+
+def _parse_bool(value: str, field_name: str) -> bool:
+    value = (_blank_to_none(value) or "").lower()
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+    raise HTTPException(status_code=400, detail=f"{field_name} must be a boolean.")
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -431,6 +710,16 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 def _cors_origins() -> list[str]:
     raw = os.environ.get("BIOSOUND_API_CORS_ORIGINS", "*")
     return ["*"] if raw.strip() == "*" else [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _with_cors(asgi_app: Any) -> Any:
+    return CORSMiddleware(
+        asgi_app,
+        allow_origins=_cors_origins(),
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 def _now_iso() -> str:
@@ -449,7 +738,8 @@ def main() -> None:
     uvicorn.run("biosound_cluster.api:app", host=host, port=port, reload=False)
 
 
-app = create_app() if FastAPI is not None else None
+fastapi_app = create_app() if FastAPI is not None else None
+app = _with_cors(fastapi_app) if fastapi_app is not None else None
 
 
 if __name__ == "__main__":

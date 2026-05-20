@@ -119,7 +119,8 @@ Variables utiles :
 BIOSOUND_API_HOST=127.0.0.1
 BIOSOUND_API_PORT=8000
 BIOSOUND_API_ROOT=outputs/api_jobs
-BIOSOUND_API_MAX_UPLOAD_MB=2048
+BIOSOUND_API_MAX_UPLOAD_MB=5120
+BIOSOUND_API_MAX_CHUNK_MB=50
 BIOSOUND_API_WORKERS=1
 BIOSOUND_API_CORS_ORIGINS="*"
 ```
@@ -157,7 +158,7 @@ GET /health
 ```json
 {
   "status": "ok",
-  "max_upload_mb": 2048,
+  "max_upload_mb": 5120,
   "workers": 1,
   "api_root": "outputs/api_jobs"
 }
@@ -166,6 +167,9 @@ GET /health
 ## 2. Créer Un Job D'Analyse Audio
 
 Upload un fichier `.wav`, enregistre les métadonnées, puis lance le traitement en tâche de fond.
+
+Cette route est pratique pour les petits fichiers. Pour des fichiers de plusieurs Go, utiliser
+l'upload par chunks décrit dans la section suivante.
 
 ```http
 POST /api/jobs
@@ -230,6 +234,102 @@ curl -X POST http://127.0.0.1:8000/api/jobs \
 ```
 
 Le frontend doit ensuite poller `status_url` jusqu'à obtenir `status: "done"` ou `status: "failed"`.
+
+## 2B. Créer Un Job Avec Upload Par Chunks
+
+Cette méthode est recommandée pour les gros fichiers audio, notamment 2-3 Go.
+
+Raison : certains tunnels HTTPS ou proxys, dont Cloudflare dans certaines configurations, bloquent
+les requêtes individuelles autour de 100 Mo. L'upload par chunks découpe le fichier en requêtes plus
+petites, typiquement 25 à 50 Mo.
+
+### Initialiser L'Upload
+
+```http
+POST /api/uploads/init
+Content-Type: multipart/form-data
+```
+
+Champs :
+
+| Champ | Type | Obligatoire | Description |
+|---|---:|---:|---|
+| `filename` | string | oui | Nom du fichier `.wav`. |
+| `total_size_bytes` | int | non | Taille totale du fichier en octets. |
+
+Réponse :
+
+```json
+{
+  "upload_id": "925651b9c12e4f0d84b37c19f8d9cf59",
+  "max_chunk_mb": 50,
+  "chunk_url_template": "http://127.0.0.1:8000/api/uploads/925651b9c12e4f0d84b37c19f8d9cf59/chunks/{chunk_index}",
+  "complete_url": "http://127.0.0.1:8000/api/uploads/925651b9c12e4f0d84b37c19f8d9cf59/complete"
+}
+```
+
+### Envoyer Un Chunk
+
+```http
+POST /api/uploads/{upload_id}/chunks/{chunk_index}
+Content-Type: multipart/form-data
+```
+
+Champs :
+
+| Champ | Type | Obligatoire | Description |
+|---|---:|---:|---|
+| `file` | file/blob | oui | Chunk du fichier audio. |
+
+`chunk_index` commence à `0`.
+
+Chaque chunk doit rester sous `BIOSOUND_API_MAX_CHUNK_MB`, par défaut 50 Mo.
+
+Réponse :
+
+```json
+{
+  "upload_id": "925651b9c12e4f0d84b37c19f8d9cf59",
+  "chunk_index": 0,
+  "size_bytes": 52428800
+}
+```
+
+### Finaliser L'Upload Et Lancer Le Pipeline
+
+```http
+POST /api/uploads/{upload_id}/complete
+Content-Type: multipart/form-data
+```
+
+Champs acceptés :
+
+```text
+sensor_id
+sensor_latitude
+sensor_longitude
+sensor_elevation_m
+environment_type
+recording_start_time
+recording_timezone
+sample_rate
+min_cluster_size
+max_events
+generate_spectrograms
+enable_polyphony_handling
+enable_clusterability_filtering
+```
+
+Réponse :
+
+```json
+{
+  "job_id": "81876fce0f554c0c81b45f836653ad3a",
+  "status": "queued",
+  "status_url": "http://127.0.0.1:8000/api/jobs/81876fce0f554c0c81b45f836653ad3a",
+  "result_url": "http://127.0.0.1:8000/api/jobs/81876fce0f554c0c81b45f836653ad3a/result"
+}
+```
 
 ## 3. Lire Le Statut D'Un Job
 

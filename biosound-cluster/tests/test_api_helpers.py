@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from biosound_cluster.api import _is_relative_to, _json_clean, _looks_like_wav, _sanitize_filename
+from biosound_cluster.api import _build_config, _is_relative_to, _json_clean, _looks_like_wav, _sanitize_filename
 
 
 def test_api_filename_and_wav_guards() -> None:
@@ -26,3 +26,28 @@ def test_api_path_and_json_helpers(tmp_path: Path) -> None:
 
     cleaned = _json_clean({"value": float("nan"), "items": [1, None, math.nan]})
     assert cleaned == {"value": None, "items": [1, None, None]}
+
+
+def test_api_build_config_keeps_upload_metadata_out_of_config() -> None:
+    config, metadata = _build_config(
+        original_filename="recording.wav",
+        saved_size_bytes=123,
+        sensor_id="sensor",
+        sensor_latitude="",
+        sensor_longitude=None,
+        sensor_elevation_m=None,
+        environment_type="forest",
+        recording_start_time=None,
+        recording_timezone=None,
+        sample_rate="32000",
+        min_cluster_size="10",
+        max_events="5",
+        generate_spectrograms="true",
+        enable_polyphony_handling="true",
+        enable_clusterability_filtering="true",
+    )
+    assert config.sensor_id == "sensor"
+    assert config.sensor_latitude is None
+    assert config.max_events == 5
+    assert metadata["saved_size_bytes"] == 123
+    assert metadata["original_filename"] == "recording.wav"
