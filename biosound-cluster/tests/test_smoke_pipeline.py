@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +81,16 @@ def test_smoke_pipeline(tmp_path: Path) -> None:
     assert result.n_events > 0
     assert any(path.is_dir() for path in output_dir.iterdir())
     assert list(output_dir.glob("**/*.wav"))
+    events = pd.read_csv(output_dir / "events.csv")
+    expected_columns = {
+        "clusterability_score",
+        "embedding_stability_score",
+        "local_snr_score",
+        "spectral_structure_score",
+        "acoustic_prefamily",
+        "representative_score",
+    }
+    assert expected_columns.issubset(events.columns)
 
 
 def test_polyphony_outputs_components_or_mixed(tmp_path: Path) -> None:
@@ -270,6 +281,67 @@ def test_metadata_only_export_skips_media_files(tmp_path: Path) -> None:
     assert (output_dir / "run_metadata.json").exists()
     assert not list(output_dir.glob("**/*.wav"))
     assert not list(output_dir.glob("**/*.png"))
+
+
+def test_recording_and_clip_metadata_json(tmp_path: Path) -> None:
+    sr = 16_000
+    audio = np.zeros(sr * 3, dtype=np.float32)
+    _add_event(audio, sr, 1.0, _tone_burst(sr, 1800, 0.35, 0.35))
+
+    input_path = tmp_path / "metadata_rich.wav"
+    sf.write(input_path, audio, sr)
+
+    output_dir = tmp_path / "metadata_rich_output"
+    process_audio_file(
+        input_path,
+        output_dir,
+        BioSoundConfig(
+            sample_rate=sr,
+            threshold_db=3.0,
+            min_cluster_size=2,
+            min_event_duration=0.1,
+            max_event_duration=1.0,
+            generate_spectrograms=False,
+            enable_polyphony_handling=False,
+            enable_noise_filtering=False,
+            enable_eventness_filtering=False,
+            enable_candidate_selection=False,
+            enable_clusterability_filtering=False,
+            sensor_id="sensor_A",
+            sensor_latitude=4.9372,
+            sensor_longitude=-52.3260,
+            sensor_elevation_m=18.5,
+            environment_type="tropical_forest",
+            recording_start_time="2026-05-20T06:30:00+02:00",
+            recording_timezone="Europe/Paris",
+            umap_neighbors=3,
+            umap_components=2,
+        ),
+    )
+
+    run_metadata = json.loads((output_dir / "run_metadata.json").read_text())
+    assert run_metadata["recording_metadata"]["sensor"]["latitude"] == 4.9372
+    assert run_metadata["recording_metadata"]["environment_type"] == "tropical_forest"
+
+    event_metadata_path = output_dir / "event_metadata.json"
+    assert event_metadata_path.exists()
+    event_metadata = json.loads(event_metadata_path.read_text())
+    assert event_metadata["recording"]["recording_start_time"] == "2026-05-20T06:30:00+02:00"
+    assert event_metadata["events"]
+    first_event = event_metadata["events"][0]
+    assert first_event["recording"]["sensor"]["sensor_id"] == "sensor_A"
+    assert first_event["clip_timing"]["start_sec"] >= 0
+    assert first_event["clip_timing"]["clip_start_time"] is not None
+
+    sidecars = [
+        path
+        for path in output_dir.glob("**/*.json")
+        if path.name not in {"run_metadata.json", "event_metadata.json"}
+    ]
+    assert sidecars
+    sidecar = json.loads(sidecars[0].read_text())
+    assert sidecar["recording"]["environment_type"] == "tropical_forest"
+    assert "clip_timing" in sidecar
 
 
 def test_segmentation_refinement_tightens_broad_event() -> None:

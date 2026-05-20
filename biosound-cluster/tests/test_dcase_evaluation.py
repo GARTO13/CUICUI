@@ -80,6 +80,10 @@ def test_evaluate_dcase2024_synthetic_dataset(tmp_path: Path) -> None:
     assert 0 <= loaded["final_score_100"] <= 100
     assert "f1" in loaded["detection"]
     assert "weighted_cluster_purity" in loaded["clustering"]
+    assert "assistant_metrics" in loaded
+    assert "normal_cluster_precision" in loaded["assistant_metrics"]
+    assert "global_recall_any_folder" in loaded["assistant_metrics"]
+    assert "representative_precision_at_k" in loaded["assistant_metrics"]
     assert 0 <= summary["final_score_100"] <= 100
 
 

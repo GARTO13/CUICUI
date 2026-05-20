@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from biosound_cluster.acoustic_prefamily import assign_acoustic_prefamilies
+from biosound_cluster.adaptive_config import adaptive_config_from_profile, describe_overrides
 from biosound_cluster.audio_io import get_audio_duration, load_audio
+from biosound_cluster.audio_profile import profile_audio
 from biosound_cluster.candidate_selection import select_clusterable_candidates
+from biosound_cluster.clusterability import analyze_and_route_clusterability
 from biosound_cluster.clustering import cluster_embeddings
 from biosound_cluster.config import BioSoundConfig
+from biosound_cluster.denoising import get_denoiser
 from biosound_cluster.embeddings import extract_embeddings
 from biosound_cluster.eventness import analyze_and_route_eventness
 from biosound_cluster.export import export_outputs
@@ -18,6 +23,7 @@ from biosound_cluster.review_routing import route_short_review_events
 from biosound_cluster.schemas import ProcessResult
 from biosound_cluster.segmentation import detect_candidate_events
 from biosound_cluster.segmentation_refinement import refine_candidate_events
+from biosound_cluster.semantic_tagging import tag_audio
 
 LOGGER = get_logger(__name__)
 
@@ -35,6 +41,44 @@ def process_audio_file(
     LOGGER.info("Loading audio: %s", input_path)
     audio, sr = load_audio(input_path, cfg.sample_rate)
     duration_sec = get_audio_duration(audio, sr)
+
+    if cfg.enable_auto_profile:
+        LOGGER.info("Profiling audio for adaptive parameter selection")
+        profile = profile_audio(audio, sr, frame_length=cfg.frame_length, hop_length=cfg.hop_length)
+        LOGGER.info(
+            "Profile: regime=%s dynamic_range=%.1fdB active=%.3f sustainedness=%.2f tonality=%.2f",
+            profile.regime,
+            profile.dynamic_range_db,
+            profile.active_fraction,
+            profile.sustainedness,
+            profile.median_tonality,
+        )
+        tags = None
+        if cfg.enable_semantic_tagging:
+            try:
+                LOGGER.info("Running optional semantic tagging")
+                tags = tag_audio(audio, sr)
+                top_tags = ", ".join(f"{name}={score:.2f}" for name, score in tags.top_global_classes[:5])
+                LOGGER.info(
+                    "Semantic tags: hint=%s top=[%s] bio=%.2f noise=%.2f",
+                    tags.regime_hint,
+                    top_tags,
+                    tags.mean_biological_score,
+                    tags.mean_noise_score,
+                )
+            except Exception as exc:
+                LOGGER.warning("Semantic tagging failed; continuing without semantic tags: %s", exc)
+        cfg = adaptive_config_from_profile(profile, base=cfg, tags=tags)
+        LOGGER.info("%s", describe_overrides(profile, tags))
+
+    if cfg.enable_denoiser:
+        LOGGER.info("Preparing optional denoised auxiliary view with %s", cfg.denoiser_name)
+        try:
+            denoiser = get_denoiser(cfg.denoiser_name)
+            _ = denoiser(audio, sr)
+            LOGGER.info("Denoiser completed; original audio remains the pipeline truth")
+        except Exception as exc:
+            LOGGER.warning("Denoiser failed; continuing with raw audio: %s", exc)
 
     LOGGER.info("Detecting candidate acoustic events")
     events = detect_candidate_events(audio, sr, cfg)
@@ -96,8 +140,26 @@ def process_audio_file(
             len(short_review_events),
         )
 
+    if clusterable_events and cfg.enable_clusterability_filtering:
+        LOGGER.info("Scoring clusterability and routing ambiguous candidates")
+        clusterable_events, clusterability_review_events = analyze_and_route_clusterability(
+            audio,
+            sr,
+            clusterable_events,
+            cfg,
+        )
+        low_confidence_noise_events.extend(clusterability_review_events)
+        LOGGER.info(
+            "Clusterability routing: %d clusterable events, %d review/low-priority events",
+            len(clusterable_events),
+            len(clusterability_review_events),
+        )
+
     clusters = []
     if clusterable_events:
+        if cfg.enable_acoustic_prefamilies:
+            LOGGER.info("Assigning acoustic pre-families")
+            clusterable_events = assign_acoustic_prefamilies(audio, sr, clusterable_events, cfg)
         LOGGER.info("Extracting handcrafted acoustic embeddings")
         embeddings = extract_embeddings(audio, sr, clusterable_events, cfg)
         LOGGER.info("Clustering events with UMAP + HDBSCAN")

@@ -27,6 +27,8 @@ def write_evaluation_report(
     dataset = summary.get("dataset", {})
     noise_filtering = summary.get("noise_filtering", {})
     short_event_review = summary.get("short_event_review", {})
+    assistant_metrics = summary.get("assistant_metrics", {})
+    stability = assistant_metrics.get("cluster_stability_summary", {}) or {}
     lines = [
         "# BioSound DCASE 2024 Evaluation Report",
         "",
@@ -58,6 +60,14 @@ def write_evaluation_report(
         f"ARI: {_fmt_optional(clustering.adjusted_rand_index)}",
         f"Annotation compression ratio: {clustering.annotation_compression_ratio:.2f}",
         "",
+        "## Annotation assistant metrics",
+        "",
+        f"Normal cluster precision: {_fmt_optional(assistant_metrics.get('normal_cluster_precision'))}",
+        f"Global recall any folder: {_fmt_optional(assistant_metrics.get('global_recall_any_folder'))}",
+        f"Representative precision@{assistant_metrics.get('representative_k', 5)}: {_fmt_optional(assistant_metrics.get('representative_precision_at_k'))}",
+        f"Cluster stability mean: {_fmt_optional(stability.get('mean'))}",
+        f"Cluster stability median: {_fmt_optional(stability.get('median'))}",
+        "",
         "## Polyphony handling",
         "",
         f"Enabled: {str(polyphony.enabled).lower()}",
@@ -69,6 +79,7 @@ def write_evaluation_report(
         "",
         f"Enabled: {str(noise_filtering.get('enabled', False)).lower()}",
         f"Low-confidence noise events: {noise_filtering.get('n_low_confidence_noise', 0)}",
+        f"Ambiguous review events: {noise_filtering.get('n_ambiguous_review', 0)}",
         f"Low-confidence rate: {noise_filtering.get('low_confidence_rate', 0.0):.3f}",
         f"Mean quality score: {_fmt_optional(noise_filtering.get('mean_quality_score'))}",
         "",
@@ -111,6 +122,7 @@ def print_evaluation_summary(summary: dict, console: Console | None = None) -> N
     polyphony = summary.get("polyphony", {})
     noise_filtering = summary.get("noise_filtering", {})
     short_event_review = summary.get("short_event_review", {})
+    assistant_metrics = summary.get("assistant_metrics", {})
     table = Table(title="BioSound DCASE Evaluation")
     table.add_column("Metric", style="bold")
     table.add_column("Value")
@@ -120,11 +132,18 @@ def print_evaluation_summary(summary: dict, console: Console | None = None) -> N
     table.add_row("Recall", f"{detection.get('recall', 0.0):.3f}")
     table.add_row("Mean IoU", f"{detection.get('mean_iou', 0.0):.3f}")
     table.add_row("Weighted purity", f"{clustering.get('weighted_cluster_purity', 0.0):.3f}")
+    table.add_row("Normal cluster precision", _fmt_optional(assistant_metrics.get("normal_cluster_precision")))
+    table.add_row("Recall any folder", _fmt_optional(assistant_metrics.get("global_recall_any_folder")))
+    table.add_row(
+        f"Representative precision@{assistant_metrics.get('representative_k', 5)}",
+        _fmt_optional(assistant_metrics.get("representative_precision_at_k")),
+    )
     table.add_row("Compression", f"{clustering.get('annotation_compression_ratio', 0.0):.2f} events/cluster")
     table.add_row("Clusters", str(clustering.get("n_clusters", 0)))
     table.add_row("Mixed events", str(polyphony.get("n_mixed_events", 0)))
     table.add_row("Component events", str(polyphony.get("n_component_events", 0)))
     table.add_row("Low-confidence noise", str(noise_filtering.get("n_low_confidence_noise", 0)))
+    table.add_row("Ambiguous review", str(noise_filtering.get("n_ambiguous_review", 0)))
     table.add_row("Short review events", str(short_event_review.get("n_short_review_events", 0)))
     console.print(table)
 

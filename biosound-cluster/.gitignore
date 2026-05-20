@@ -7,6 +7,15 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Cluster run artifacts - not committed
 outputs/
+data/
+logs/
+*.sqsh
+slurm-*.out
+
+# Test fixtures generated locally
 tests/generated_synthetic.wav
+
 .DS_Store

@@ -24,6 +24,7 @@ class NoiseFeatures:
     spectral_flatness: float
     tonality_score: float
     bandwidth_hz: float
+    peak_band_snr_db: float
     quality_score: float
 
 
@@ -43,12 +44,13 @@ def analyze_and_route_noise(
         return [], []
 
     noise_floor_db = estimate_recording_noise_floor_db(audio, config)
+    band_noise_floor_db = estimate_per_band_noise_floor_db(audio, sr, config)
     clusterable: list[AudioEvent] = []
     low_confidence: list[AudioEvent] = []
 
     for event in events:
         try:
-            features = compute_noise_features(audio, sr, event, config, noise_floor_db)
+            features = compute_noise_features(audio, sr, event, config, noise_floor_db, band_noise_floor_db)
             _attach_noise_features(event, features)
             if is_low_confidence_noise(features, config):
                 low_confidence.append(_mark_low_confidence_noise(event, features))
@@ -72,17 +74,79 @@ def estimate_recording_noise_floor_db(audio: np.ndarray, config: BioSoundConfig)
     return float(np.percentile(rms_db, 20)) if rms_db.size else -120.0
 
 
+def estimate_per_band_noise_floor_db(
+    audio: np.ndarray,
+    sr: int,
+    config: BioSoundConfig,
+    n_mels: int = 32,
+) -> np.ndarray:
+    """Estimate a robust per-mel-band noise floor (dB) from the whole recording."""
+    if audio.size == 0:
+        return np.full(n_mels, -120.0, dtype=np.float32)
+    n_fft = min(config.frame_length, max(256, audio.size))
+    hop_length = min(config.hop_length, max(64, n_fft // 4))
+    mel = librosa.feature.melspectrogram(
+        y=audio,
+        sr=sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        power=2.0,
+    )
+    if mel.size == 0:
+        return np.full(n_mels, -120.0, dtype=np.float32)
+    mel_db = librosa.power_to_db(np.maximum(mel, 1e-20), ref=1.0)
+    return np.percentile(mel_db, 20, axis=1).astype(np.float32)
+
+
+def compute_peak_band_snr_db(
+    clip: np.ndarray,
+    sr: int,
+    band_noise_floor_db: np.ndarray,
+    config: BioSoundConfig,
+) -> float:
+    """Concentration of the per-band SNR distribution: peak band SNR minus median band SNR.
+
+    A narrowband call has one or two loud bands and the rest near the noise floor — large gap.
+    Broadband noise lights every band roughly equally — small gap. So this distinguishes
+    "concentrated biological event" from "broadband disturbance" even when both have high
+    overall SNR.
+    """
+    if clip.size == 0 or band_noise_floor_db.size == 0:
+        return 0.0
+    n_mels = int(band_noise_floor_db.size)
+    n_fft = min(config.frame_length, max(256, 2 ** int(np.floor(np.log2(max(256, clip.size))))))
+    hop_length = min(config.hop_length, max(64, n_fft // 4))
+    mel = librosa.feature.melspectrogram(
+        y=clip,
+        sr=sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        power=2.0,
+    )
+    if mel.size == 0:
+        return 0.0
+    mel_db = librosa.power_to_db(np.maximum(mel, 1e-20), ref=1.0)
+    band_event_levels = np.percentile(mel_db, 75, axis=1)
+    band_snrs = band_event_levels - band_noise_floor_db
+    if band_snrs.size == 0:
+        return 0.0
+    return float(np.max(band_snrs) - np.median(band_snrs))
+
+
 def compute_noise_features(
     audio: np.ndarray,
     sr: int,
     event: AudioEvent,
     config: BioSoundConfig,
     recording_noise_floor_db: float,
+    band_noise_floor_db: np.ndarray | None = None,
 ) -> NoiseFeatures:
-    """Compute SNR, flatness, tonality, bandwidth, and an aggregate quality score."""
+    """Compute SNR, flatness, tonality, bandwidth, peak-band SNR, and an aggregate quality score."""
     clip = extract_event_clip(audio, sr, event)
     if clip.size == 0:
-        return NoiseFeatures(0.0, recording_noise_floor_db, 1.0, 0.0, 0.0, 0.0)
+        return NoiseFeatures(0.0, recording_noise_floor_db, 1.0, 0.0, 0.0, 0.0, 0.0)
 
     n_fft = min(config.frame_length, max(256, 2 ** int(np.floor(np.log2(max(256, clip.size))))))
     hop_length = min(config.hop_length, max(64, n_fft // 4))
@@ -93,7 +157,7 @@ def compute_noise_features(
 
     stft_mag = np.abs(librosa.stft(clip, n_fft=n_fft, hop_length=hop_length))
     if stft_mag.size == 0:
-        return NoiseFeatures(snr_db, recording_noise_floor_db, 1.0, 0.0, 0.0, 0.0)
+        return NoiseFeatures(snr_db, recording_noise_floor_db, 1.0, 0.0, 0.0, 0.0, 0.0)
 
     flatness_values = librosa.feature.spectral_flatness(S=stft_mag)[0]
     flatness = float(np.nanmedian(np.nan_to_num(flatness_values, nan=1.0))) if flatness_values.size else 1.0
@@ -103,13 +167,18 @@ def compute_noise_features(
     bandwidth_hz = float(np.nanmedian(np.nan_to_num(bandwidth, nan=0.0))) if bandwidth.size else 0.0
 
     tonality = _spectral_tonality(stft_mag)
-    quality = _quality_score(snr_db, flatness, tonality, bandwidth_hz, sr, config)
+    if band_noise_floor_db is None:
+        band_noise_floor_db = estimate_per_band_noise_floor_db(audio, sr, config)
+    peak_band_snr_db = compute_peak_band_snr_db(clip, sr, band_noise_floor_db, config)
+
+    quality = _quality_score(snr_db, flatness, tonality, bandwidth_hz, peak_band_snr_db, sr, config)
     return NoiseFeatures(
         snr_db=float(snr_db),
         noise_floor_db=float(recording_noise_floor_db),
         spectral_flatness=float(np.clip(flatness, 0.0, 1.0)),
         tonality_score=float(np.clip(tonality, 0.0, 1.0)),
         bandwidth_hz=bandwidth_hz,
+        peak_band_snr_db=float(peak_band_snr_db),
         quality_score=float(np.clip(quality, 0.0, 1.0)),
     )
 
@@ -122,7 +191,8 @@ def is_low_confidence_noise(features: NoiseFeatures, config: BioSoundConfig) -> 
         and features.spectral_flatness > config.noise_max_flatness
         and features.tonality_score < config.noise_min_tonality
     )
-    return features.quality_score < threshold or obvious_broadband_noise
+    weak_tonality = features.tonality_score < config.weak_tonality_floor
+    return features.quality_score < threshold or obvious_broadband_noise or weak_tonality
 
 
 def _spectral_tonality(stft_mag: np.ndarray) -> float:
@@ -139,6 +209,7 @@ def _quality_score(
     flatness: float,
     tonality: float,
     bandwidth_hz: float,
+    peak_band_snr_db: float,
     sr: int,
     config: BioSoundConfig,
 ) -> float:
@@ -147,11 +218,13 @@ def _quality_score(
     tonality_score = _smoothstep(config.noise_min_tonality, 0.42, tonality)
     bandwidth_ratio = bandwidth_hz / max(1.0, sr / 2.0)
     bandwidth_score = 1.0 - _smoothstep(0.45, 0.95, bandwidth_ratio)
+    peak_band_score = _smoothstep(config.noise_min_snr_db, config.noise_min_snr_db + 18.0, peak_band_snr_db)
     return (
-        0.25 * snr_score
-        + 0.35 * flatness_score
-        + 0.30 * tonality_score
-        + 0.10 * bandwidth_score
+        0.15 * snr_score
+        + 0.30 * flatness_score
+        + 0.20 * tonality_score
+        + 0.05 * bandwidth_score
+        + 0.30 * peak_band_score
     )
 
 
@@ -177,6 +250,7 @@ def _attach_noise_features(event: AudioEvent, features: NoiseFeatures) -> None:
     event.spectral_flatness = features.spectral_flatness
     event.tonality_score = features.tonality_score
     event.bandwidth_hz = features.bandwidth_hz
+    event.peak_band_snr_db = features.peak_band_snr_db
     event.quality_score = features.quality_score
 
 

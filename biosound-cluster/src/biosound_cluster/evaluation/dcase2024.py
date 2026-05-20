@@ -18,6 +18,7 @@ from biosound_cluster.evaluation.metrics import (
     DetectionMetrics,
     aggregate_detection_metrics,
     assign_predictions_to_ground_truth,
+    compute_annotation_assistant_metrics,
     compute_clustering_metrics,
     compute_detection_metrics,
     compute_global_score,
@@ -220,7 +221,14 @@ def evaluate_dcase2024(
             matched_frames.append(matched)
             clustering = compute_clustering_metrics(matched)
             polyphony = compute_polyphony_metrics(events_df)
+            assistant_metrics = compute_annotation_assistant_metrics(
+                matched,
+                n_gt=len(gt_events),
+                iou_threshold=iou_threshold,
+                overlap_threshold=overlap_threshold,
+            )
             n_low_confidence_noise = _count_low_confidence_noise(events_df)
+            n_ambiguous_review = _count_ambiguous_review(events_df)
             n_short_review = _count_short_review(events_df)
             score = compute_global_score(detection, clustering, polyphony)
             detection_items.append(detection)
@@ -238,11 +246,15 @@ def evaluate_dcase2024(
                     "detection_f1": detection.f1,
                     "mean_iou": detection.mean_iou,
                     "weighted_cluster_purity": clustering.weighted_cluster_purity,
+                    "normal_cluster_precision": assistant_metrics.get("normal_cluster_precision"),
+                    "global_recall_any_folder": assistant_metrics.get("global_recall_any_folder"),
+                    "representative_precision_at_k": assistant_metrics.get("representative_precision_at_k"),
                     "annotation_compression_ratio": clustering.annotation_compression_ratio,
                     "n_clusters": clustering.n_clusters,
                     "n_noise": clustering.n_noise,
                     "n_mixed_events": polyphony.n_mixed_events,
                     "n_low_confidence_noise": n_low_confidence_noise,
+                    "n_ambiguous_review": n_ambiguous_review,
                     "n_short_review_events": n_short_review,
                     "n_component_events": polyphony.n_component_events,
                     "final_score_100": score.final_score_100,
@@ -260,6 +272,12 @@ def evaluate_dcase2024(
     polyphony_agg = compute_polyphony_metrics(events_all)
     noise_filtering = _noise_filtering_summary(events_all)
     short_event_review = _short_review_summary(events_all)
+    assistant_metrics = compute_annotation_assistant_metrics(
+        matched_all,
+        n_gt=detection_agg.n_gt,
+        iou_threshold=iou_threshold,
+        overlap_threshold=overlap_threshold,
+    )
     score_agg = compute_global_score(detection_agg, clustering_agg, polyphony_agg)
 
     per_file_csv = output_dir / "per_file_metrics.csv"
@@ -285,6 +303,7 @@ def evaluate_dcase2024(
         "polyphony": polyphony_agg.to_dict(),
         "noise_filtering": noise_filtering,
         "short_event_review": short_event_review,
+        "assistant_metrics": assistant_metrics,
         "score": score_agg.to_dict(),
         "outputs": {
             "per_file_metrics_csv": str(per_file_csv),
@@ -474,6 +493,12 @@ def _count_low_confidence_noise(events_df: pd.DataFrame) -> int:
     return int((events_df["source_type"].fillna("") == "low_confidence_noise").sum())
 
 
+def _count_ambiguous_review(events_df: pd.DataFrame) -> int:
+    if events_df.empty or "source_type" not in events_df.columns:
+        return 0
+    return int((events_df["source_type"].fillna("") == "ambiguous_review").sum())
+
+
 def _count_short_review(events_df: pd.DataFrame) -> int:
     if events_df.empty or "source_type" not in events_df.columns:
         return 0
@@ -484,10 +509,12 @@ def _noise_filtering_summary(events_df: pd.DataFrame) -> dict[str, object]:
     if events_df.empty or "source_type" not in events_df.columns:
         return {"enabled": False, "n_low_confidence_noise": 0, "low_confidence_rate": 0.0, "mean_quality_score": None}
     n_low = _count_low_confidence_noise(events_df)
+    n_ambiguous = _count_ambiguous_review(events_df)
     quality = pd.to_numeric(events_df.get("quality_score"), errors="coerce").dropna() if "quality_score" in events_df.columns else pd.Series(dtype=float)
     return {
         "enabled": "quality_score" in events_df.columns,
         "n_low_confidence_noise": n_low,
+        "n_ambiguous_review": n_ambiguous,
         "low_confidence_rate": float(n_low / len(events_df)) if len(events_df) else 0.0,
         "mean_quality_score": float(quality.mean()) if not quality.empty else None,
     }

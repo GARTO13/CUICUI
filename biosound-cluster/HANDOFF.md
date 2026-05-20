@@ -3,6 +3,12 @@
 Date: 2026-05-19  
 Project path: `/Users/thomas/CUICUI/biosound-cluster`
 
+Update on 2026-05-20:
+
+The GitHub repository `jeremydoumeng/CUICluster` was cloned and integrated locally. The integration
+was done as a targeted merge, not a blind overwrite, to preserve the local evaluation code, short
+event review changes, and handoff notes.
+
 ## Product goal
 
 `biosound-cluster` is a human-in-the-loop bioacoustic annotation assistant.
@@ -62,6 +68,10 @@ Core steps:
 - `eventness.py`: temporal salience scoring.
 - `candidate_selection.py`: component limiting and duplicate pruning.
 - `review_routing.py`: short-event review routing.
+- `audio_profile.py`: global audio profiling for adaptive parameters.
+- `adaptive_config.py`: maps audio profiles to updated `BioSoundConfig` values.
+- `denoising.py`: optional lazy-loaded denoising backend hook.
+- `semantic_tagging.py`: optional lazy-loaded PANNs/AudioSet semantic-prior hook.
 - `features.py`, `embeddings.py`: handcrafted acoustic embeddings.
 - `clustering.py`: UMAP + HDBSCAN clustering.
 - `export.py`: folder/media/CSV/report/HTML export.
@@ -611,3 +621,74 @@ The most useful next engineering goal is:
 > increase precision while keeping recall reasonably stable, by improving segmentation and candidate
 > quality before clustering.
 
+## GitHub CUICluster integration
+
+Integrated from:
+
+```text
+https://github.com/jeremydoumeng/CUICluster
+```
+
+Added modules:
+
+- `src/biosound_cluster/audio_profile.py`
+- `src/biosound_cluster/adaptive_config.py`
+- `src/biosound_cluster/denoising.py`
+- `src/biosound_cluster/semantic_tagging.py`
+- `sbatches/*.sbatch`
+
+Merged behavioral changes:
+
+- spectral-concentration vote in segmentation,
+- adaptive audio profiling hook in the pipeline,
+- optional semantic tagging hook, disabled by default,
+- optional denoiser hook, disabled by default,
+- stronger peak-band SNR feature in noise scoring,
+- stricter default quality/eventness/component thresholds from the GitHub version,
+- CLI flags for auto-profile, semantic tagging, and denoising.
+
+Important:
+
+- `enable_auto_profile = False` by default.
+- `enable_semantic_tagging = False` by default.
+- `enable_denoiser = False` by default.
+- Semantic tagging requires optional `panns-inference`.
+- Denoising requires optional `biodenoising` and `torch`.
+- The normal lightweight install still passes tests without those packages.
+
+Validation after GitHub integration:
+
+```text
+.venv/bin/python -m compileall src/biosound_cluster
+.venv/bin/python -m pytest -q
+
+8 passed, 6 warnings
+```
+
+Additional update on 2026-05-20:
+
+Implemented incremental cluster-quality protection:
+
+- conservative multi-band segmentation in `segmentation.py`,
+- explicit `clusterability_score` routing in `clusterability.py`,
+- multi-view `embedding_stability_score`,
+- simple acoustic pre-families in `acoustic_prefamily.py`,
+- pre-family-aware clustering and improved representative scoring in `clustering.py`,
+- extra metadata/reporting columns in `events.csv`, `clusters.csv`, `report.md`, and `index.html`.
+
+Important fields now present in `events.csv`:
+
+- `clusterability_score`
+- `embedding_stability_score`
+- `local_snr_score`
+- `spectral_structure_score`
+- `duration_confidence`
+- `broadband_noise_penalty`
+- `overlap_penalty`
+- `edge_case_penalty`
+- `acoustic_prefamily`
+- `cluster_stability_score`
+- `representative_score`
+
+The original audio is never replaced by denoised or filtered audio. Auxiliary views are only used
+for scoring/features.

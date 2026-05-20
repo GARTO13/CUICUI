@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import librosa
 import numpy as np
 from scipy.ndimage import binary_closing, binary_opening, percentile_filter
+from scipy.signal import butter, sosfiltfilt
 
 from biosound_cluster.config import BioSoundConfig
 from biosound_cluster.schemas import AudioEvent
@@ -100,6 +101,97 @@ def _spectral_flux(audio: np.ndarray, sr: int, config: BioSoundConfig) -> np.nda
     return np.pad(flux, (1, 0), mode="edge") if flux.size else np.array([], dtype=np.float32)
 
 
+def _frame_spectral_flatness(audio: np.ndarray, config: BioSoundConfig) -> np.ndarray:
+    """Compute per-frame spectral flatness; low values mean frequency-concentrated energy."""
+    if audio.size == 0:
+        return np.array([], dtype=np.float32)
+    stft_mag = np.abs(
+        librosa.stft(
+            y=audio,
+            n_fft=config.frame_length,
+            hop_length=config.hop_length,
+            center=True,
+        )
+    )
+    if stft_mag.size == 0:
+        return np.array([], dtype=np.float32)
+    flatness = librosa.feature.spectral_flatness(S=stft_mag)[0]
+    return np.nan_to_num(flatness, nan=1.0).astype(np.float32)
+
+
+def _default_frequency_bands(sr: int) -> list[tuple[str, float, float]]:
+    nyquist = sr / 2.0
+    candidates = [
+        ("low", 100.0, 800.0),
+        ("mid", 800.0, 3000.0),
+        ("high", 3000.0, 8000.0),
+        ("ultra_high", 8000.0, nyquist),
+    ]
+    return [
+        (name, low, min(high, nyquist * 0.98))
+        for name, low, high in candidates
+        if low < nyquist * 0.95 and min(high, nyquist * 0.98) > low
+    ]
+
+
+def _bandpass(audio: np.ndarray, sr: int, low_hz: float, high_hz: float) -> np.ndarray:
+    if audio.size == 0:
+        return audio.astype(np.float32)
+    nyquist = sr / 2.0
+    low = max(1.0, low_hz) / nyquist
+    high = min(high_hz, nyquist * 0.98) / nyquist
+    if not 0 < low < high < 1:
+        return audio.astype(np.float32)
+    sos = butter(4, [low, high], btype="bandpass", output="sos")
+    if audio.size <= 3 * sos.shape[0] * 2:
+        return audio.astype(np.float32)
+    try:
+        return sosfiltfilt(sos, audio).astype(np.float32)
+    except ValueError:
+        return audio.astype(np.float32)
+
+
+def _robust_flux_z(values: np.ndarray) -> np.ndarray:
+    diff = np.pad(np.maximum(np.diff(values), 0.0), (1, 0), mode="edge") if values.size > 1 else np.zeros_like(values)
+    median = float(np.median(diff)) if diff.size else 0.0
+    mad = float(np.median(np.abs(diff - median))) + 1e-9
+    return (diff - median) / (1.4826 * mad)
+
+
+def _multiband_activity(audio: np.ndarray, sr: int, config: BioSoundConfig, target_len: int) -> np.ndarray:
+    """Detect structured local activity in coarse frequency bands."""
+    if target_len <= 0 or audio.size == 0:
+        return np.zeros(target_len, dtype=bool)
+
+    combined = np.zeros(target_len, dtype=bool)
+    window_frames = max(5, int(round(config.multiband_local_noise_window_sec * sr / config.hop_length)))
+    for _, low_hz, high_hz in _default_frequency_bands(sr):
+        band_audio = _bandpass(audio, sr, low_hz, high_hz)
+        band_rms_db = compute_rms_db(band_audio, config.frame_length, config.hop_length)
+        if band_rms_db.size == 0:
+            continue
+        band_rms_db = band_rms_db[:target_len]
+        if band_rms_db.size < target_len:
+            band_rms_db = np.pad(band_rms_db, (0, target_len - band_rms_db.size), mode="edge")
+        noise_floor = rolling_percentile(band_rms_db, percentile=20.0, window_frames=window_frames)
+        local_snr = band_rms_db - noise_floor
+        flux_z = _robust_flux_z(band_rms_db)
+        flatness = _frame_spectral_flatness(band_audio, config)[:target_len]
+        if flatness.size == 0:
+            flatness = np.ones(target_len, dtype=np.float32)
+        elif flatness.size < target_len:
+            flatness = np.pad(flatness, (0, target_len - flatness.size), mode="edge")
+        structured = flatness < config.spectral_concentration_max_flatness
+        band_active = (
+            (local_snr >= config.multiband_min_snr_db)
+            & ((flux_z >= config.multiband_min_flux_z) | structured)
+        )
+        combined |= band_active
+    close_frames = max(1, int(round(config.multiband_merge_gap_sec * sr / config.hop_length)))
+    combined = binary_closing(combined, structure=np.ones(close_frames, dtype=bool))
+    return combined
+
+
 def _active_frames_to_intervals(active: np.ndarray, sr: int, hop_length: int, duration_sec: float) -> list[tuple[float, float]]:
     intervals: list[tuple[float, float]] = []
     in_event = False
@@ -148,7 +240,18 @@ def detect_candidate_events(audio: np.ndarray, sr: int, config: BioSoundConfig) 
     else:
         flux_active = np.zeros_like(energy_active, dtype=bool)
 
-    active = np.logical_or(energy_active, flux_active)
+    if config.enable_spectral_concentration_gate:
+        flatness = _frame_spectral_flatness(audio, config)[:min_len]
+        if flatness.size < min_len:
+            flatness = np.pad(flatness, (0, min_len - flatness.size), mode="edge")
+        concentrated_active = flatness < config.spectral_concentration_max_flatness
+    else:
+        concentrated_active = np.ones_like(energy_active, dtype=bool)
+
+    votes = energy_active.astype(np.int8) + flux_active.astype(np.int8) + concentrated_active.astype(np.int8)
+    active = votes >= config.segmentation_min_active_votes
+    if config.enable_multiband_segmentation:
+        active = np.logical_or(active, _multiband_activity(audio, sr, config, min_len))
     close_frames = max(1, int(round(config.merge_gap * sr / config.hop_length)))
     open_frames = max(1, int(round(0.04 * sr / config.hop_length)))
     active = binary_opening(active, structure=np.ones(open_frames, dtype=bool))

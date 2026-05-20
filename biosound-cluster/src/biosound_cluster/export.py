@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import shutil
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,7 @@ EVENT_FIELDS = [
     "spectral_flatness",
     "tonality_score",
     "bandwidth_hz",
+    "peak_band_snr_db",
     "quality_score",
     "eventness_score",
     "temporal_contrast_db",
@@ -55,6 +57,18 @@ EVENT_FIELDS = [
     "is_pruned_candidate",
     "candidate_route_reason",
     "is_short_review_event",
+    "local_snr_score",
+    "spectral_structure_score",
+    "duration_confidence",
+    "embedding_stability_score",
+    "broadband_noise_penalty",
+    "overlap_penalty",
+    "edge_case_penalty",
+    "clusterability_score",
+    "is_ambiguous_review",
+    "acoustic_prefamily",
+    "cluster_stability_score",
+    "representative_score",
 ]
 
 CLUSTER_FIELDS = [
@@ -66,6 +80,9 @@ CLUSTER_FIELDS = [
     "mean_purity_score",
     "n_component_events",
     "n_original_events",
+    "mean_clusterability_score",
+    "mean_stability_score",
+    "acoustic_prefamily",
 ]
 
 TOP_LEVEL_OUTPUT_FILES = {
@@ -73,6 +90,7 @@ TOP_LEVEL_OUTPUT_FILES = {
     "clusters.csv",
     "report.md",
     "run_metadata.json",
+    "event_metadata.json",
     "index.html",
 }
 
@@ -111,6 +129,140 @@ def _write_clusters_csv(path: Path, clusters: list[ClusterSummary]) -> None:
     pd.DataFrame(rows, columns=CLUSTER_FIELDS).to_csv(path, index=False)
 
 
+def _score_summary(events: list[AudioEvent], field: str) -> str:
+    values = [
+        getattr(event, field)
+        for event in events
+        if getattr(event, field) is not None
+    ]
+    if not values:
+        return "n/a"
+    array = np.asarray(values, dtype=float)
+    return (
+        f"mean={np.mean(array):.3f}, median={np.median(array):.3f}, "
+        f"p10={np.percentile(array, 10):.3f}, p90={np.percentile(array, 90):.3f}"
+    )
+
+
+def _recording_metadata(input_path: Path, duration_sec: float, sr: int, config: BioSoundConfig) -> dict[str, object]:
+    return {
+        "input_path": str(input_path),
+        "sample_rate": sr,
+        "duration_sec": duration_sec,
+        "recording_start_time": config.recording_start_time,
+        "recording_timezone": config.recording_timezone,
+        "sensor": {
+            "sensor_id": config.sensor_id,
+            "latitude": config.sensor_latitude,
+            "longitude": config.sensor_longitude,
+            "elevation_m": config.sensor_elevation_m,
+        },
+        "environment_type": config.environment_type,
+    }
+
+
+def _parse_recording_start(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _time_at_offset(recording_start: datetime | None, offset_sec: float) -> str | None:
+    if recording_start is None:
+        return None
+    return (recording_start + timedelta(seconds=float(offset_sec))).isoformat()
+
+
+def _event_metadata_row(
+    event: AudioEvent,
+    input_path: Path,
+    duration_sec: float,
+    sr: int,
+    config: BioSoundConfig,
+) -> dict[str, object]:
+    recording_start = _parse_recording_start(config.recording_start_time)
+    return {
+        "event_id": event.event_id,
+        "source_type": event.source_type,
+        "cluster_id": event.cluster_id,
+        "is_noise": event.is_noise,
+        "is_mixed": event.is_mixed,
+        "is_component": event.is_component,
+        "parent_event_id": event.parent_event_id,
+        "component_id": event.component_id,
+        "recording": _recording_metadata(input_path, duration_sec, sr, config),
+        "clip_timing": {
+            "start_sec": event.start_sec,
+            "end_sec": event.end_sec,
+            "duration_sec": event.duration_sec,
+            "recording_start_time": config.recording_start_time,
+            "clip_start_time": _time_at_offset(recording_start, event.start_sec),
+            "clip_end_time": _time_at_offset(recording_start, event.end_sec),
+        },
+        "files": {
+            "clip_path": event.clip_path,
+            "spectrogram_path": event.spectrogram_path,
+            "context_clip_path": event.context_clip_path,
+        },
+        "scores": {
+            "clusterability_score": event.clusterability_score,
+            "embedding_stability_score": event.embedding_stability_score,
+            "eventness_score": event.eventness_score,
+            "quality_score": event.quality_score,
+            "representative_score": event.representative_score,
+        },
+        "acoustic_prefamily": event.acoustic_prefamily,
+    }
+
+
+def _write_event_sidecar_json(
+    path: Path,
+    event: AudioEvent,
+    input_path: Path,
+    duration_sec: float,
+    sr: int,
+    config: BioSoundConfig,
+) -> None:
+    metadata = _event_metadata_row(event, input_path, duration_sec, sr, config)
+    path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
+def _write_context_sidecar_json(
+    path: Path,
+    event: AudioEvent,
+    input_path: Path,
+    duration_sec: float,
+    sr: int,
+    config: BioSoundConfig,
+) -> None:
+    metadata = _event_metadata_row(event, input_path, duration_sec, sr, config)
+    metadata["audio_role"] = "original_context"
+    metadata["files"]["separated_component_clip_path"] = event.clip_path
+    metadata["files"]["clip_path"] = event.context_clip_path
+    path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
+def _write_event_metadata_json(
+    path: Path,
+    events: list[AudioEvent],
+    input_path: Path,
+    duration_sec: float,
+    sr: int,
+    config: BioSoundConfig,
+) -> None:
+    payload = {
+        "recording": _recording_metadata(input_path, duration_sec, sr, config),
+        "events": [
+            _event_metadata_row(event, input_path, duration_sec, sr, config)
+            for event in events
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _write_report(
     path: Path,
     input_path: Path,
@@ -125,6 +277,9 @@ def _write_report(
 ) -> None:
     n_components = sum(1 for event in events if event.is_component)
     n_originals = sum(1 for event in events if event.source_type == "original")
+    all_events = events + mixed_events + low_confidence_noise_events + short_review_events
+    ambiguous_events = [event for event in low_confidence_noise_events if event.source_type == "ambiguous_review"]
+    cluster_sizes = [cluster.size for cluster in clusters]
     mixed_folder = f"mixed_overlapping_size_{len(mixed_events):03d}" if mixed_events else "none"
     low_noise_folder = (
         f"low_confidence_noise_size_{len(low_confidence_noise_events):03d}"
@@ -148,10 +303,24 @@ def _write_report(
         f"- Input file: `{input_path}`",
         f"- Audio duration: {duration_sec:.2f} seconds",
         f"- Exported events: {len(events) + len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events)}",
+        f"- Events sent to normal clustering: {len(events)}",
+        f"- Events routed to review/low confidence: {len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events)}",
         f"- Acoustic clusters: {len(clusters)}",
         f"- Noise/unknown events: {n_noise}",
         f"- Low-confidence noise events excluded from clustering: {len(low_confidence_noise_events)}",
+        f"- Ambiguous review events excluded from clustering: {len(ambiguous_events)}",
         f"- Short review events excluded from main clusters: {len(short_review_events)}",
+        f"- Mean cluster size: {float(np.mean(cluster_sizes)):.2f}" if cluster_sizes else "- Mean cluster size: n/a",
+        f"- Median cluster size: {float(np.median(cluster_sizes)):.2f}" if cluster_sizes else "- Median cluster size: n/a",
+        "",
+        "## Clusterability and stability",
+        "",
+        f"- Clusterability filtering enabled: {str(config.enable_clusterability_filtering).lower()}",
+        f"- Minimum clusterability for clustering: {config.min_clusterability_for_clustering:.3f}",
+        f"- Clusterability score distribution: {_score_summary(all_events, 'clusterability_score')}",
+        f"- Embedding stability enabled: {str(config.enable_embedding_stability).lower()}",
+        f"- Embedding stability distribution: {_score_summary(all_events, 'embedding_stability_score')}",
+        f"- Acoustic pre-families enabled: {str(config.enable_acoustic_prefamilies).lower()}",
         "",
         "## Noise filtering",
         "",
@@ -190,7 +359,10 @@ def _write_report(
         lines.extend(["## Clusters", ""])
         for cluster in clusters:
             reps = ", ".join(cluster.representative_event_ids) or "none"
-            lines.append(f"- `{cluster.folder_name}`: {cluster.size} events; representatives: {reps}")
+            lines.append(
+                f"- `{cluster.folder_name}`: {cluster.size} events; "
+                f"prefamily={cluster.acoustic_prefamily or 'unknown'}; representatives: {reps}"
+            )
         if n_noise:
             lines.append(f"- `noise_unknown_size_{n_noise:03d}`: {n_noise} events")
         if mixed_events:
@@ -208,6 +380,16 @@ def _representative_html(event: AudioEvent, output_dir: Path) -> str:
     image = html.escape(str(Path(event.spectrogram_path or "").as_posix())) if event.spectrogram_path else ""
     title = html.escape(f"{event.event_id} {event.start_sec:.3f}-{event.end_sec:.3f}s")
     source = html.escape(event.source_type)
+    score_bits = []
+    if event.representative_score is not None:
+        score_bits.append(f"rep={event.representative_score:.3f}")
+    if event.clusterability_score is not None:
+        score_bits.append(f"clusterability={event.clusterability_score:.3f}")
+    if event.embedding_stability_score is not None:
+        score_bits.append(f"stability={event.embedding_stability_score:.3f}")
+    if event.acoustic_prefamily:
+        score_bits.append(f"family={event.acoustic_prefamily}")
+    score_html = f'<p class="source">{" | ".join(html.escape(bit) for bit in score_bits)}</p>' if score_bits else ""
     context = ""
     if event.context_clip_path:
         context_path = html.escape(str(Path(event.context_clip_path).as_posix()))
@@ -218,6 +400,7 @@ def _representative_html(event: AudioEvent, output_dir: Path) -> str:
         '<div class="rep">'
         f"<h3>{title}</h3>"
         f'<p class="source">source: {source}</p>'
+        f"{score_html}"
         f"{image_html}"
         f"{audio_html}"
         f"{context}"
@@ -276,11 +459,12 @@ def _write_index_html(
         )
     if low_confidence_noise_events:
         low_noise_folder = f"low_confidence_noise_size_{len(low_confidence_noise_events):03d}"
+        ambiguous_count = sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review")
         reps_html = "\n".join(_representative_html(event, path.parent) for event in low_confidence_noise_events[:5])
         cards.append(
             '<section class="cluster low-noise">'
-            "<h2>Low-confidence noise</h2>"
-            f"<p>{len(low_confidence_noise_events)} events excluded from normal clustering because they are likely broadband, low-SNR, or weakly structured.</p>"
+            "<h2>Low-confidence / ambiguous review</h2>"
+            f"<p>{len(low_confidence_noise_events)} events excluded from normal clustering; {ambiguous_count} were marked ambiguous by clusterability scoring.</p>"
             f'<p><a href="{low_noise_folder}/_cluster_manifest.csv">manifest</a></p>'
             f'<div class="reps">{reps_html}</div>'
             "</section>"
@@ -336,6 +520,7 @@ def _write_index_html(
       <div class="metric"><span>Noise/unknown</span><strong>{n_noise}</strong></div>
       <div class="metric"><span>Mixed/overlapping</span><strong>{len(mixed_events)}</strong></div>
       <div class="metric"><span>Low-confidence noise</span><strong>{len(low_confidence_noise_events)}</strong></div>
+      <div class="metric"><span>Ambiguous review</span><strong>{sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review")}</strong></div>
       <div class="metric"><span>Short review</span><strong>{len(short_review_events)}</strong></div>
     </div>
     <p><a href="events.csv">events.csv</a> | <a href="clusters.csv">clusters.csv</a> | <a href="report.md">report.md</a></p>
@@ -354,6 +539,8 @@ def _export_event_media(
     root: Path,
     folder: Path,
     config: BioSoundConfig,
+    input_path: Path,
+    duration_sec: float,
 ) -> None:
     if not config.export_clips:
         event.clip_path = None
@@ -377,6 +564,11 @@ def _export_event_media(
         if config.generate_spectrograms:
             context_png = folder / f"{stem}__context_original.png"
             save_spectrogram_png(event.context_audio, sr, context_png)
+        context_json = folder / f"{stem}__context_original.json"
+        _write_context_sidecar_json(context_json, event, input_path, duration_sec, sr, config)
+
+    json_path = folder / f"{stem}.json"
+    _write_event_sidecar_json(json_path, event, input_path, duration_sec, sr, config)
 
 
 def export_outputs(
@@ -435,17 +627,17 @@ def export_outputs(
     for event in events:
         key = None if event.is_noise else event.cluster_id
         folder = folder_by_key[key]
-        _export_event_media(audio, sr, event, root, folder, config)
+        _export_event_media(audio, sr, event, root, folder, config, input_path, duration_sec)
 
     if mixed_folder is not None and config.export_mixed_overlapping:
         for event in mixed_events:
-            _export_event_media(audio, sr, event, root, mixed_folder, config)
+            _export_event_media(audio, sr, event, root, mixed_folder, config, input_path, duration_sec)
     if low_noise_folder is not None and config.export_low_confidence_noise:
         for event in low_confidence_noise_events:
-            _export_event_media(audio, sr, event, root, low_noise_folder, config)
+            _export_event_media(audio, sr, event, root, low_noise_folder, config, input_path, duration_sec)
     if short_review_folder is not None and config.export_short_events_review:
         for event in short_review_events:
-            _export_event_media(audio, sr, event, root, short_review_folder, config)
+            _export_event_media(audio, sr, event, root, short_review_folder, config, input_path, duration_sec)
 
     events_by_id = {event.event_id: event for event in events}
     for cluster in clusters:
@@ -461,6 +653,9 @@ def export_outputs(
             if event.spectrogram_path:
                 source_png = root / event.spectrogram_path
                 shutil.copy2(source_png, representatives_dir / source_png.name)
+            source_json = source_wav.with_suffix(".json")
+            if source_json.exists():
+                shutil.copy2(source_json, representatives_dir / source_json.name)
 
     for key, folder in folder_by_key.items():
         cluster_events = [
@@ -491,14 +686,17 @@ def export_outputs(
     report_md = root / "report.md"
     index_html = root / "index.html"
     metadata_json = root / "run_metadata.json"
+    event_metadata_json = root / "event_metadata.json"
     n_noise = sum(1 for event in events if event.is_noise) + len(low_confidence_noise_events)
     all_events = events + mixed_events + low_confidence_noise_events + short_review_events
 
     _write_events_csv(events_csv, all_events)
     _write_clusters_csv(clusters_csv, clusters)
+    _write_event_metadata_json(event_metadata_json, all_events, input_path, duration_sec, sr, config)
     metadata = {
         "input_path": str(input_path),
         "output_dir": str(root),
+        "recording_metadata": _recording_metadata(input_path, duration_sec, sr, config),
         "duration_sec": duration_sec,
         "sample_rate": sr,
         "n_events": len(all_events),
@@ -506,9 +704,12 @@ def export_outputs(
         "n_noise": n_noise,
         "n_mixed": len(mixed_events),
         "n_low_confidence_noise": len(low_confidence_noise_events),
+        "n_ambiguous_review": sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review"),
         "n_short_review": len(short_review_events),
         "n_component_events": sum(1 for event in events if event.is_component),
         "n_original_events": sum(1 for event in events if event.source_type == "original"),
+        "clusterability_score_summary": _score_summary(all_events, "clusterability_score"),
+        "embedding_stability_score_summary": _score_summary(all_events, "embedding_stability_score"),
         "config": config_to_dict(config),
         "config_hash": config_fingerprint(config),
     }
@@ -522,6 +723,7 @@ def export_outputs(
         "report_md": report_md,
         "index_html": index_html,
         "run_metadata_json": metadata_json,
+        "event_metadata_json": event_metadata_json,
     }
 
 

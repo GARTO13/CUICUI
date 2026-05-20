@@ -24,10 +24,14 @@ dependencies = [
   "matplotlib",
   "typer",
   "rich",
+  "fastapi",
+  "uvicorn",
+  "python-multipart",
 ]
 
 [project.scripts]
 biosound-cluster = "biosound_cluster.cli:main"
+biosound-api = "biosound_cluster.api:main"
 biosound-evaluate-dcase = "biosound_cluster.evaluation.cli:main"
 biosound-tune-dcase = "biosound_cluster.evaluation.cli:tune_main"
 

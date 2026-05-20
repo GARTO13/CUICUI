@@ -39,6 +39,7 @@ class AudioEvent:
     spectral_flatness: float | None = None
     tonality_score: float | None = None
     bandwidth_hz: float | None = None
+    peak_band_snr_db: float | None = None
     quality_score: float | None = None
     eventness_score: float | None = None
     temporal_contrast_db: float | None = None
@@ -48,6 +49,18 @@ class AudioEvent:
     is_pruned_candidate: bool = False
     candidate_route_reason: str | None = None
     is_short_review_event: bool = False
+    local_snr_score: float | None = None
+    spectral_structure_score: float | None = None
+    duration_confidence: float | None = None
+    embedding_stability_score: float | None = None
+    broadband_noise_penalty: float | None = None
+    overlap_penalty: float | None = None
+    edge_case_penalty: float | None = None
+    clusterability_score: float | None = None
+    is_ambiguous_review: bool = False
+    acoustic_prefamily: str | None = None
+    cluster_stability_score: float | None = None
+    representative_score: float | None = None
     separated_audio: np.ndarray | None = field(default=None, repr=False, compare=False)
     context_audio: np.ndarray | None = field(default=None, repr=False, compare=False)
 
@@ -72,6 +85,9 @@ class ClusterSummary:
     mean_purity_score: float | None = None
     n_component_events: int = 0
     n_original_events: int = 0
+    mean_clusterability_score: float | None = None
+    mean_stability_score: float | None = None
+    acoustic_prefamily: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON/CSV-friendly dictionary."""

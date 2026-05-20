@@ -94,7 +94,7 @@ def _normal_events(pred_events: pd.DataFrame) -> pd.DataFrame:
         return pred_events.copy()
     events = pred_events.copy()
     if "source_type" in events.columns:
-        events = events[~events["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "short_review"})]
+        events = events[~events["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})]
     if "is_mixed" in events.columns:
         events = events[~events["is_mixed"].fillna(False).astype(bool)]
     if "is_low_confidence_noise" in events.columns:
@@ -222,6 +222,11 @@ def assign_predictions_to_ground_truth(
                 "matched_gt_label",
                 "match_iou",
                 "match_overlap_ratio",
+                "matched_gt_key",
+                "clusterability_score",
+                "embedding_stability_score",
+                "cluster_stability_score",
+                "representative_score",
             ]
         )
 
@@ -251,9 +256,99 @@ def assign_predictions_to_ground_truth(
                 "matched_gt_label": best_gt.label if best_gt else "",
                 "match_iou": best_iou,
                 "match_overlap_ratio": best_overlap,
+                "matched_gt_key": (
+                    f"{file_id}:{best_gt.start_sec:.6f}-{best_gt.end_sec:.6f}:{best_gt.label}"
+                    if best_gt
+                    else ""
+                ),
+                "clusterability_score": pred.get("clusterability_score"),
+                "embedding_stability_score": pred.get("embedding_stability_score"),
+                "cluster_stability_score": pred.get("cluster_stability_score"),
+                "representative_score": pred.get("representative_score"),
             }
         )
     return pd.DataFrame(rows)
+
+
+def compute_annotation_assistant_metrics(
+    matched_predictions: pd.DataFrame,
+    n_gt: int,
+    iou_threshold: float = 0.3,
+    overlap_threshold: float = 0.3,
+    representative_k: int = 5,
+) -> dict[str, object]:
+    """
+    Compute product-oriented metrics for the human review workflow.
+
+    These metrics ask whether events are preserved somewhere, whether normal
+    clusters are clean, and whether top representatives are likely useful.
+    """
+    if matched_predictions.empty:
+        return {
+            "normal_cluster_precision": None,
+            "global_recall_any_folder": 0.0 if n_gt else None,
+            "representative_precision_at_k": None,
+            "representative_k": representative_k,
+            "cluster_stability_summary": _numeric_summary(pd.Series(dtype=float)),
+        }
+
+    df = matched_predictions.copy()
+    usable = _usable_match_mask(df, iou_threshold, overlap_threshold)
+    source = df.get("source_type", pd.Series(["original"] * len(df))).fillna("original")
+    cluster_ids = pd.to_numeric(df.get("cluster_id"), errors="coerce")
+    normal_clustered = (
+        ~source.isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})
+        & cluster_ids.notna()
+        & (cluster_ids != -1)
+    )
+
+    n_normal = int(normal_clustered.sum())
+    normal_precision = float((usable & normal_clustered).sum() / n_normal) if n_normal else None
+
+    matched_keys = df.loc[usable, "matched_gt_key"] if "matched_gt_key" in df.columns else pd.Series(dtype=str)
+    matched_keys = matched_keys.fillna("").astype(str)
+    n_unique_gt_any = int(matched_keys[matched_keys != ""].nunique())
+    global_recall = float(n_unique_gt_any / n_gt) if n_gt else None
+
+    rep_precision = None
+    if n_normal:
+        reps = df[normal_clustered].copy()
+        reps["_usable"] = usable[normal_clustered].to_numpy()
+        reps["_rep_score"] = pd.to_numeric(reps.get("representative_score"), errors="coerce").fillna(0.0)
+        top_rows = []
+        for _, group in reps.groupby(["file_id", "cluster_id"], dropna=False):
+            top_rows.append(group.sort_values("_rep_score", ascending=False).head(representative_k))
+        top = pd.concat(top_rows, ignore_index=True) if top_rows else pd.DataFrame()
+        if not top.empty:
+            rep_precision = float(top["_usable"].mean())
+
+    stability = pd.to_numeric(df.loc[normal_clustered, "cluster_stability_score"], errors="coerce") if "cluster_stability_score" in df.columns else pd.Series(dtype=float)
+    return {
+        "normal_cluster_precision": normal_precision,
+        "global_recall_any_folder": global_recall,
+        "representative_precision_at_k": rep_precision,
+        "representative_k": representative_k,
+        "cluster_stability_summary": _numeric_summary(stability),
+    }
+
+
+def _usable_match_mask(df: pd.DataFrame, iou_threshold: float, overlap_threshold: float) -> pd.Series:
+    iou = pd.to_numeric(df.get("match_iou"), errors="coerce").fillna(0.0)
+    overlap = pd.to_numeric(df.get("match_overlap_ratio"), errors="coerce").fillna(0.0)
+    labels = df.get("matched_gt_label", pd.Series([""] * len(df))).fillna("").astype(str)
+    return labels.ne("") & ((iou >= iou_threshold) | (overlap >= overlap_threshold))
+
+
+def _numeric_summary(values: pd.Series) -> dict[str, float | None]:
+    clean = pd.to_numeric(values, errors="coerce").dropna()
+    if clean.empty:
+        return {"mean": None, "median": None, "p10": None, "p90": None}
+    return {
+        "mean": float(clean.mean()),
+        "median": float(clean.median()),
+        "p10": float(clean.quantile(0.10)),
+        "p90": float(clean.quantile(0.90)),
+    }
 
 
 def compute_clustering_metrics(matched_predictions: pd.DataFrame) -> ClusteringMetrics:
@@ -262,7 +357,7 @@ def compute_clustering_metrics(matched_predictions: pd.DataFrame) -> ClusteringM
         return ClusteringMetrics(0, 0, 0, 0.0, 0.0, None, None, 0.0, 0.0, 0.0)
 
     df = matched_predictions.copy()
-    df = df[~df["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "short_review"})]
+    df = df[~df["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})]
     df = df[df["matched_gt_label"].fillna("") != ""]
     cluster_ids = pd.to_numeric(df["cluster_id"], errors="coerce")
     n_noise = int(cluster_ids.isna().sum() + (cluster_ids == -1).sum())

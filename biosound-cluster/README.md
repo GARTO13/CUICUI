@@ -72,8 +72,31 @@ Use `--no-spectrograms` to skip PNG generation for faster debugging runs. Use `-
 for large evaluation sweeps where you only need CSV/JSON metrics and do not want to fill the disk
 with exported WAV/PNG media.
 
-The detector combines energy and spectral flux. If a recording produces too many tiny structured
-false positives, try `--disable-flux-detection` or let the DCASE tuner test that option.
+You can attach deployment metadata to a run. These values are stored in `run_metadata.json`,
+`event_metadata.json`, and in a `.json` sidecar next to each exported audio clip:
+
+```bash
+biosound-cluster path/to/recording.wav \
+  --output outputs/demo \
+  --sensor-id GUYANE_001 \
+  --sensor-latitude 4.9372 \
+  --sensor-longitude -52.3260 \
+  --sensor-elevation-m 18.5 \
+  --environment-type tropical_forest \
+  --recording-start-time "2026-05-20T06:30:00+02:00" \
+  --recording-timezone Europe/Paris
+```
+
+Each event metadata JSON contains the recording start time, clip start/end seconds, absolute
+clip start/end times when the recording start time is ISO-8601 parseable, sensor coordinates, and
+the environment type.
+
+The detector combines broadband energy, spectral flux, spectral concentration, and conservative
+multi-band detection. The multi-band detector checks low, mid, high, and ultra-high frequency bands
+for local SNR and temporal contrast, which helps keep faint structured calls without relying on one
+global threshold. If a recording produces too many tiny structured false positives, try
+`--disable-flux-detection`, `--disable-multiband-segmentation`, or let the DCASE tuner test those
+options.
 
 Segmentation refinement is enabled by default. It tightens event boundaries after the broad
 detection pass and removes near-duplicate overlapping detections before clustering. Use
@@ -93,6 +116,36 @@ main clusters. This keeps cluster representatives more useful when a researcher 
 listen to a handful of examples per acoustic family. Use `--disable-short-event-review` if you want
 maximum recall in the main cluster folders.
 
+Clusterability filtering is enabled by default. It combines eventness, local SNR, spectral
+structure, duration confidence, embedding stability, broadband-noise penalty, and overlap penalty.
+Events below `--min-clusterability-for-clustering` are kept in review metadata/folders instead of
+entering normal clustering. This protects clusters while preserving traceability.
+
+Embedding stability is also enabled by default. It compares handcrafted embeddings from the original
+clip, a center crop, and a simple band-limited view. The original audio remains the truth; auxiliary
+views are only used for scoring.
+
+Acoustic pre-families are enabled by default. They are broad morphology buckets such as
+`tonal_whistle`, `harmonic_call`, `pulse_train`, `broadband_click`, `noisy_burst`,
+`insect_trill`, and `low_frequency_call`. They are not species labels.
+
+Cluster stability scoring uses the main HDBSCAN membership probability by default. You can enable
+a slower lightweight ensemble with `--cluster-ensemble-runs 3` or `5` to annotate
+`cluster_stability_score` from multiple clustering runs.
+
+Adaptive profiling is available but disabled by default. It profiles each recording and adjusts
+thresholds, duration limits, merge gaps, and quality gates according to the acoustic regime:
+
+```bash
+biosound-cluster path/to/recording.wav \
+  --output outputs/demo \
+  --enable-auto-profile
+```
+
+Optional semantic tagging and denoising hooks are also present, but they require extra heavy
+dependencies that are not installed by default. The core project still works without internet,
+GPU, species labels, or external models.
+
 Noise filtering is enabled by default. It computes SNR, spectral flatness, tonality, bandwidth,
 and an aggregate acoustic quality score for each event. Low-confidence broadband or weakly
 structured events are exported for review but excluded from normal clustering:
@@ -101,7 +154,7 @@ structured events are exported for review but excluded from normal clustering:
 biosound-cluster path/to/recording.wav \
   --output outputs/demo \
   --noise-mode balanced \
-  --min-quality-for-clustering 0.45
+  --min-quality-for-clustering 0.55
 ```
 
 Use `--noise-mode exploratory` to keep more faint events, `--noise-mode conservative` to produce
@@ -145,12 +198,72 @@ process_audio_file("mon_audio.wav", "output_clusters")
 The concrete result is a folder per acoustic family, with short clips and spectrograms ready for
 a researcher to listen to, inspect, and label manually.
 
+## Browser / Lovable API
+
+The project also exposes a small FastAPI service for a website or Lovable frontend. It accepts one
+`.wav` upload plus deployment metadata, processes the recording in a background job, then returns
+clusters, event audio URLs, spectrogram URLs, and metadata.
+
+Start the API:
+
+```bash
+pip install -e .
+biosound-api
+```
+
+By default the API listens on `http://127.0.0.1:8000` and stores jobs in `outputs/api_jobs/`.
+
+Useful environment variables:
+
+```bash
+BIOSOUND_API_HOST=127.0.0.1
+BIOSOUND_API_PORT=8000
+BIOSOUND_API_ROOT=outputs/api_jobs
+BIOSOUND_API_MAX_UPLOAD_MB=2048
+BIOSOUND_API_WORKERS=1
+BIOSOUND_API_CORS_ORIGINS="*"
+```
+
+Upload from a frontend as `multipart/form-data`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs \
+  -F "file=@path/to/recording.wav" \
+  -F "sensor_id=GUYANE_001" \
+  -F "sensor_latitude=4.9372" \
+  -F "sensor_longitude=-52.3260" \
+  -F "environment_type=tropical_forest" \
+  -F "recording_start_time=2026-05-20T06:30:00+02:00" \
+  -F "recording_timezone=Europe/Paris"
+```
+
+Then poll and fetch results:
+
+```bash
+GET /api/jobs/{job_id}
+GET /api/jobs/{job_id}/result
+GET /api/jobs/{job_id}/clusters
+GET /api/jobs/{job_id}/events
+GET /api/jobs/{job_id}/files/{relative_output_path}
+```
+
+Long-audio safeguards:
+
+- uploads are streamed to disk in chunks;
+- only `.wav` files with a RIFF/WAVE header are accepted;
+- upload size is capped by `BIOSOUND_API_MAX_UPLOAD_MB`;
+- processing runs asynchronously in a bounded worker pool;
+- generated files are served only from the job output folder;
+- each clip keeps a JSON metadata sidecar with recording time, cut timing, sensor metadata, and
+  scoring fields.
+
 ## Output Structure
 
 ```text
 outputs/my_run/
   report.md
   run_metadata.json
+  event_metadata.json
   events.csv
   clusters.csv
   index.html
@@ -161,6 +274,7 @@ outputs/my_run/
       event_000012__12.340-13.820.wav
       event_000012__12.340-13.820.png
     event_000012__12.340-13.820.wav
+    event_000012__12.340-13.820.json
     event_000012__12.340-13.820.png
     event_000034__45.100-46.700.wav
     event_000034__45.100-46.700.png
@@ -198,8 +312,8 @@ biologically valuable; they are simply routed for expert review instead of being
 the normal acoustic-family clusters.
 
 `low_confidence_noise_size_...` contains events excluded before clustering because they look
-broadband, low-SNR, or weakly structured. They are kept for human review rather than deleted, because
-rare biological sounds can sometimes look noisy.
+broadband, low-SNR, weakly structured, or ambiguous by clusterability scoring. They are kept for
+human review rather than deleted, because rare biological sounds can sometimes look noisy.
 
 `short_events_review_size_...` contains very short events excluded from the main clusters. They may
 be real signals, but they are often poor representatives for quick cluster labeling because there is
