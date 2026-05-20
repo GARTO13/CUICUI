@@ -255,7 +255,9 @@ curl -X POST http://127.0.0.1:8000/api/jobs \
   -F "sensor_longitude=-52.3260" \
   -F "environment_type=tropical_forest" \
   -F "recording_start_time=2026-05-20T06:30:00+02:00" \
-  -F "recording_timezone=Europe/Paris"
+  -F "recording_timezone=Europe/Paris" \
+  -F "enable_auto_profile=true" \
+  -F "min_cluster_size=5"
 ```
 
 Then poll and fetch results:

@@ -114,9 +114,10 @@ environment_type                  string optionnel
 recording_start_time              string optionnel, idéalement ISO-8601
 recording_timezone                string optionnel
 sample_rate                       number, défaut 32000
-min_cluster_size                  number, défaut 10
+min_cluster_size                  number, défaut 5
 max_events                        number optionnel
 generate_spectrograms             boolean, défaut true
+enable_auto_profile               boolean, défaut true
 enable_polyphony_handling         boolean, défaut true
 enable_clusterability_filtering   boolean, défaut true
 ```
@@ -207,6 +208,7 @@ sample_rate
 min_cluster_size
 max_events
 generate_spectrograms
+enable_auto_profile
 enable_polyphony_handling
 enable_clusterability_filtering
 ```
@@ -362,6 +364,8 @@ Utiliser l'upload par chunks :
 2. Découper le fichier côté navigateur en chunks de 25 à 50 Mo.
 3. Envoyer chaque chunk avec POST /api/uploads/{upload_id}/chunks/{chunk_index}.
 4. Appeler POST /api/uploads/{upload_id}/complete avec les métadonnées.
+
+Envoyer aussi enable_auto_profile=true par défaut pour les longs fichiers de terrain.
 
 Après la réponse, stocker job_id, puis poller GET /api/jobs/{job_id} toutes les 3 à 5 secondes.
 Quand status vaut "done", appeler GET /api/jobs/{job_id}/result.

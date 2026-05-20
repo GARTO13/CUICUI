@@ -40,14 +40,17 @@ def test_api_build_config_keeps_upload_metadata_out_of_config() -> None:
         recording_start_time=None,
         recording_timezone=None,
         sample_rate="32000",
-        min_cluster_size="10",
+        min_cluster_size="5",
         max_events="5",
         generate_spectrograms="true",
+        enable_auto_profile="true",
         enable_polyphony_handling="true",
         enable_clusterability_filtering="true",
     )
     assert config.sensor_id == "sensor"
     assert config.sensor_latitude is None
     assert config.max_events == 5
+    assert config.min_cluster_size == 5
+    assert config.enable_auto_profile is True
     assert metadata["saved_size_bytes"] == 123
     assert metadata["original_filename"] == "recording.wav"

@@ -201,9 +201,10 @@ Options de traitement :
 | Champ | Type | Défaut | Description |
 |---|---:|---:|---|
 | `sample_rate` | int | `32000` | Fréquence d'échantillonnage cible. |
-| `min_cluster_size` | int | `10` | Taille minimale HDBSCAN des clusters. |
+| `min_cluster_size` | int | `5` | Taille minimale HDBSCAN des clusters. |
 | `max_events` | int ou null | `null` | Limite optionnelle du nombre d'événements, utile pour debug. |
 | `generate_spectrograms` | bool | `true` | Génère les images `.png`. |
+| `enable_auto_profile` | bool | `true` | Adapte automatiquement les seuils aux gros fichiers faibles ou difficiles. |
 | `enable_polyphony_handling` | bool | `true` | Active la gestion des sons superposés. |
 | `enable_clusterability_filtering` | bool | `true` | Active le routage des événements ambigus hors clustering normal. |
 
@@ -219,7 +220,7 @@ curl -X POST http://127.0.0.1:8000/api/jobs \
   -F "environment_type=tropical_forest" \
   -F "recording_start_time=2026-05-20T06:30:00+02:00" \
   -F "recording_timezone=Europe/Paris" \
-  -F "min_cluster_size=10"
+  -F "min_cluster_size=5"
 ```
 
 ### Réponse `202 Accepted`
@@ -316,6 +317,7 @@ sample_rate
 min_cluster_size
 max_events
 generate_spectrograms
+enable_auto_profile
 enable_polyphony_handling
 enable_clusterability_filtering
 ```
@@ -369,7 +371,7 @@ GET /api/jobs/{job_id}
     },
     "config": {
       "sample_rate": 32000,
-      "min_cluster_size": 10,
+      "min_cluster_size": 5,
       "enable_polyphony_handling": true,
       "enable_clusterability_filtering": true
     }

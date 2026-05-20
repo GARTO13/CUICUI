@@ -101,9 +101,10 @@ def create_app() -> Any:
         recording_start_time: str | None = Form(None),
         recording_timezone: str | None = Form(None),
         sample_rate: str = Form("32000"),
-        min_cluster_size: str = Form("10"),
+        min_cluster_size: str = Form("5"),
         max_events: str | None = Form(None),
         generate_spectrograms: str = Form("true"),
+        enable_auto_profile: str = Form("true"),
         enable_polyphony_handling: str = Form("true"),
         enable_clusterability_filtering: str = Form("true"),
     ) -> dict[str, Any]:
@@ -141,6 +142,7 @@ def create_app() -> Any:
             min_cluster_size=min_cluster_size,
             max_events=max_events,
             generate_spectrograms=generate_spectrograms,
+            enable_auto_profile=enable_auto_profile,
             enable_polyphony_handling=enable_polyphony_handling,
             enable_clusterability_filtering=enable_clusterability_filtering,
         )
@@ -217,9 +219,10 @@ def create_app() -> Any:
         recording_start_time: str | None = Form(None),
         recording_timezone: str | None = Form(None),
         sample_rate: str = Form("32000"),
-        min_cluster_size: str = Form("10"),
+        min_cluster_size: str = Form("5"),
         max_events: str | None = Form(None),
         generate_spectrograms: str = Form("true"),
+        enable_auto_profile: str = Form("true"),
         enable_polyphony_handling: str = Form("true"),
         enable_clusterability_filtering: str = Form("true"),
     ) -> dict[str, Any]:
@@ -262,6 +265,7 @@ def create_app() -> Any:
             min_cluster_size=min_cluster_size,
             max_events=max_events,
             generate_spectrograms=generate_spectrograms,
+            enable_auto_profile=enable_auto_profile,
             enable_polyphony_handling=enable_polyphony_handling,
             enable_clusterability_filtering=enable_clusterability_filtering,
         )
@@ -415,6 +419,7 @@ def _build_config(
     min_cluster_size: str,
     max_events: str | None,
     generate_spectrograms: str,
+    enable_auto_profile: str,
     enable_polyphony_handling: str,
     enable_clusterability_filtering: str,
 ) -> tuple[BioSoundConfig, dict[str, Any]]:
@@ -435,6 +440,7 @@ def _build_config(
         "max_events": _optional_int(max_events, "max_events"),
         "generate_spectrograms": _parse_bool(generate_spectrograms, "generate_spectrograms"),
         "export_clips": True,
+        "enable_auto_profile": _parse_bool(enable_auto_profile, "enable_auto_profile"),
         "enable_polyphony_handling": _parse_bool(enable_polyphony_handling, "enable_polyphony_handling"),
         "enable_clusterability_filtering": _parse_bool(
             enable_clusterability_filtering, "enable_clusterability_filtering"
