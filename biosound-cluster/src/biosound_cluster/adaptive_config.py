@@ -46,7 +46,13 @@ def _threshold_from_dynamic_range(profile: AudioProfile) -> dict[str, object]:
     """
     dr = profile.dynamic_range_db
     if dr < 12.0:
-        return {"threshold_db": 2.0}
+        return {
+            "threshold_db": 4.0,
+            "flux_percentile": 82.0,
+            "flux_min_snr_db": 0.5,
+            "multiband_min_snr_db": 3.0,
+            "multiband_min_flux_z": 1.0,
+        }
     if dr < 18.0:
         return {"threshold_db": 3.5}
     if dr < 25.0:
@@ -93,7 +99,8 @@ def _segmentation_votes_from_regime(profile: AudioProfile) -> dict[str, object]:
             "segmentation_min_active_votes": 1,
         }
     if profile.regime == "low_dynamic_range":
-        # Quiet songbird-like: 2 votes is too strict; relax to 1.
+        # Quiet/faint recordings need sensitive segmentation, but we keep review routing
+        # downstream so extra candidates do not automatically pollute normal clusters.
         return {"segmentation_min_active_votes": 1}
     return {}
 
@@ -109,6 +116,15 @@ def _tonality_floor_from_profile(profile: AudioProfile) -> dict[str, object]:
 
 def _quality_gate_from_profile(profile: AudioProfile) -> dict[str, object]:
     """If the recording is generally quiet, relax the quality gate."""
+    if profile.dynamic_range_db < 12.0:
+        return {
+            "noise_mode": "exploratory",
+            "min_quality_for_clustering": 0.25,
+            "min_eventness_for_clustering": 0.10,
+            "min_clusterability_for_clustering": 0.30,
+            "min_clusterability_for_review": 0.10,
+            "enable_short_event_review": False,
+        }
     if profile.dynamic_range_db < 18.0:
         return {"min_quality_for_clustering": 0.40}
     return {}
@@ -153,6 +169,10 @@ def describe_overrides(profile: AudioProfile, tags: SemanticTags | None) -> str:
     lines: list[str] = []
     for field_name in (
         "threshold_db",
+        "flux_percentile",
+        "flux_min_snr_db",
+        "multiband_min_snr_db",
+        "multiband_min_flux_z",
         "min_event_duration",
         "max_event_duration",
         "min_review_event_duration",
@@ -160,8 +180,13 @@ def describe_overrides(profile: AudioProfile, tags: SemanticTags | None) -> str:
         "enable_flux_detection",
         "enable_spectral_concentration_gate",
         "segmentation_min_active_votes",
+        "noise_mode",
         "weak_tonality_floor",
         "min_quality_for_clustering",
+        "min_eventness_for_clustering",
+        "min_clusterability_for_clustering",
+        "min_clusterability_for_review",
+        "enable_short_event_review",
     ):
         before = getattr(cfg_default, field_name)
         after = getattr(cfg_adaptive, field_name)
