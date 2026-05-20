@@ -211,6 +211,26 @@ pip install -e .
 biosound-api
 ```
 
+Lovable/Cloudflare-style launch command:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Then expose it from a second terminal:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+or:
+
+```bash
+ngrok http 8000
+```
+
+Use the generated HTTPS tunnel URL as the frontend API base URL.
+
 By default the API listens on `http://127.0.0.1:8000` and stores jobs in `outputs/api_jobs/`.
 
 Useful environment variables:

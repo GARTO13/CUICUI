@@ -27,6 +27,71 @@ https://<votre-domaine-api>
 
 Toutes les routes ci-dessous sont relatives à cette URL de base.
 
+## Lancer L'API Pour Lovable
+
+Depuis le dossier backend :
+
+```bash
+cd /Users/thomas/CUICUI/biosound-cluster
+```
+
+Activer l'environnement virtuel :
+
+```bash
+source .venv/bin/activate
+```
+
+Installer ou mettre à jour le projet :
+
+```bash
+pip install -e .
+```
+
+Lancer FastAPI avec `uvicorn` :
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Alternative équivalente propre au package :
+
+```bash
+biosound-api
+```
+
+Pour que Lovable puisse appeler l'API depuis internet, ouvrir un second terminal et créer un tunnel HTTPS.
+
+Avec Cloudflare Tunnel :
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+Avec ngrok :
+
+```bash
+ngrok http 8000
+```
+
+Le tunnel renvoie une URL publique du type :
+
+```text
+https://xxxxx.trycloudflare.com
+```
+
+Dans Lovable, utiliser cette URL comme URL de base de l'API.
+
+Exemple :
+
+```text
+https://xxxxx.trycloudflare.com/health
+https://xxxxx.trycloudflare.com/api/jobs
+```
+
+Note : le fichier `main.py` à la racine du projet existe uniquement pour rendre la commande
+`uvicorn main:app` compatible avec les guides de déploiement. Le code réel de l'API reste dans
+`src/biosound_cluster/api.py`.
+
 ## Authentification
 
 Version actuelle :
