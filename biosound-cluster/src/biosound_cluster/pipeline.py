@@ -21,6 +21,7 @@ from biosound_cluster.noise import analyze_and_route_noise
 from biosound_cluster.polyphony import analyze_and_split_events
 from biosound_cluster.review_routing import route_short_review_events
 from biosound_cluster.schemas import ProcessResult
+from biosound_cluster.schemas import AudioEvent
 from biosound_cluster.segmentation import detect_candidate_events
 from biosound_cluster.segmentation_refinement import refine_candidate_events
 from biosound_cluster.semantic_tagging import tag_audio
@@ -90,6 +91,7 @@ def process_audio_file(
         LOGGER.info("Segmentation refinement: %d -> %d candidate events", before, len(events))
 
     mixed_events = []
+    component_review_events = []
     low_confidence_noise_events = []
     short_review_events = []
     clusterable_events = events
@@ -97,9 +99,24 @@ def process_audio_file(
         LOGGER.info("Analyzing polyphony and splitting separable overlapping sounds")
         clusterable_events, mixed_events = analyze_and_split_events(audio, sr, events, cfg)
         LOGGER.info(
-            "Polyphony routing: %d clusterable events, %d mixed/overlapping events",
+            "Polyphony routing: %d candidate events, %d mixed/overlapping events",
             len(clusterable_events),
             len(mixed_events),
+        )
+        clusterable_events, component_review_events = _split_component_review(clusterable_events)
+        LOGGER.info(
+            "Component explosion control: %d clusterable events, %d component-review events",
+            len(clusterable_events),
+            len(component_review_events),
+        )
+
+    if clusterable_events and cfg.enable_detection_quality_routing:
+        clusterable_events, low_detection_events = _route_low_detection_confidence(clusterable_events, cfg)
+        low_confidence_noise_events.extend(low_detection_events)
+        LOGGER.info(
+            "Detection-confidence routing: %d clusterable events, %d low-detection-confidence review events",
+            len(clusterable_events),
+            len(low_detection_events),
         )
 
     if clusterable_events and cfg.enable_noise_filtering:
@@ -156,6 +173,7 @@ def process_audio_file(
         )
 
     clusters = []
+    clusterable_events = _normal_clusterable_events(clusterable_events)
     if clusterable_events:
         if cfg.enable_acoustic_prefamilies:
             LOGGER.info("Assigning acoustic pre-families")
@@ -183,6 +201,7 @@ def process_audio_file(
         mixed_events=mixed_events,
         low_confidence_noise_events=low_confidence_noise_events,
         short_review_events=short_review_events,
+        component_review_events=component_review_events,
     )
     n_noise = sum(1 for event in clusterable_events if event.is_noise) + len(low_confidence_noise_events)
 
@@ -191,7 +210,7 @@ def process_audio_file(
         output_dir=str(output_dir),
         duration_sec=duration_sec,
         sample_rate=sr,
-        n_events=len(clusterable_events) + len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events),
+        n_events=len(clusterable_events) + len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events) + len(component_review_events),
         n_clusters=len(clusters),
         n_noise=n_noise,
         events_csv=str(paths["events_csv"]),
@@ -201,3 +220,57 @@ def process_audio_file(
     )
     LOGGER.info("Done: %s", output_dir)
     return result
+
+
+def _split_component_review(events: list[AudioEvent]) -> tuple[list[AudioEvent], list[AudioEvent]]:
+    clusterable: list[AudioEvent] = []
+    review: list[AudioEvent] = []
+    for event in events:
+        if event.is_component_review or event.source_type == "component_review" or not getattr(event, "clusterable", True):
+            event.cluster_id = None
+            event.cluster_probability = None
+            event.is_component_review = True
+            event.clusterable = False
+            if event.source_type == "component":
+                event.source_type = "component_review"
+            review.append(event)
+        else:
+            event.clusterable = True
+            clusterable.append(event)
+    return clusterable, review
+
+
+def _route_low_detection_confidence(
+    events: list[AudioEvent],
+    config: BioSoundConfig,
+) -> tuple[list[AudioEvent], list[AudioEvent]]:
+    if not config.route_low_detection_score_to_review:
+        return events, []
+    clusterable: list[AudioEvent] = []
+    review: list[AudioEvent] = []
+    for event in events:
+        score = event.detection_score
+        if score is not None and score < config.min_clusterable_detection_score:
+            event.cluster_id = None
+            event.cluster_probability = None
+            event.clusterable = False
+            event.is_low_detection_confidence = True
+            event.is_low_confidence_event = True
+            event.source_type = "low_detection_confidence"
+            event.routing_reason = "low_detection_confidence"
+            review.append(event)
+        else:
+            event.clusterable = True
+            clusterable.append(event)
+    return clusterable, review
+
+
+def _normal_clusterable_events(events: list[AudioEvent]) -> list[AudioEvent]:
+    return [
+        event
+        for event in events
+        if getattr(event, "clusterable", True)
+        and not getattr(event, "is_mixed", False)
+        and not getattr(event, "is_component_review", False)
+        and not getattr(event, "is_low_detection_confidence", False)
+    ]

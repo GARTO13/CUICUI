@@ -90,35 +90,62 @@ def interval_overlap_ratio(a_start: float, a_end: float, b_start: float, b_end: 
 
 
 def _normal_events(pred_events: pd.DataFrame) -> pd.DataFrame:
+    return _prediction_view(pred_events, parent_aware=True, clusterable_only=False)
+
+
+def _prediction_view(
+    pred_events: pd.DataFrame,
+    parent_aware: bool = True,
+    clusterable_only: bool = False,
+) -> pd.DataFrame:
     if pred_events.empty:
         return pred_events.copy()
     events = pred_events.copy()
+    if clusterable_only and "clusterable" in events.columns:
+        events = events[events["clusterable"].fillna(True).astype(bool)]
     if "source_type" in events.columns:
-        events = events[~events["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})]
+        excluded = {"mixed", "low_confidence_noise", "ambiguous_review", "short_review", "component_review", "low_detection_confidence"}
+        events = events[~events["source_type"].fillna("original").isin(excluded)]
     if "is_mixed" in events.columns:
         events = events[~events["is_mixed"].fillna(False).astype(bool)]
     if "is_low_confidence_noise" in events.columns:
         events = events[~events["is_low_confidence_noise"].fillna(False).astype(bool)]
-    return _collapse_component_predictions(events.reset_index(drop=True))
+    if "is_component_review" in events.columns:
+        events = events[~events["is_component_review"].fillna(False).astype(bool)]
+    if "is_low_detection_confidence" in events.columns:
+        events = events[~events["is_low_detection_confidence"].fillna(False).astype(bool)]
+    events = events.reset_index(drop=True)
+    return build_parent_aware_temporal_predictions(events) if parent_aware else events
 
 
-def _collapse_component_predictions(events: pd.DataFrame) -> pd.DataFrame:
-    """Collapse separated components back to their parent for temporal detection metrics."""
+def build_parent_aware_temporal_predictions(events_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse components from the same parent for temporal detection metrics.
+
+    Each temporal_prediction_id is parent_event_id when present, otherwise event_id.
+    """
+    events = events_df.copy()
     if events.empty or "source_type" not in events.columns or "parent_event_id" not in events.columns:
         return events
-    component_mask = (events["source_type"].fillna("") == "component") & events["parent_event_id"].fillna("").astype(str).ne("")
+    if "event_id" not in events.columns:
+        events["event_id"] = [f"prediction_{idx}" for idx in range(len(events))]
+    component_mask = events["parent_event_id"].fillna("").astype(str).ne("")
     if not component_mask.any():
+        events["temporal_prediction_id"] = events["event_id"]
         return events
 
     originals = events[~component_mask].copy()
+    originals["temporal_prediction_id"] = originals["event_id"]
     rows: list[dict[str, object]] = []
     for parent_id, group in events[component_mask].groupby("parent_event_id", dropna=True):
         first = group.iloc[0].to_dict()
-        first["event_id"] = str(parent_id)
+        first["temporal_prediction_id"] = str(parent_id)
         first["start_sec"] = float(pd.to_numeric(group["start_sec"], errors="coerce").min())
         first["end_sec"] = float(pd.to_numeric(group["end_sec"], errors="coerce").max())
         first["duration_sec"] = first["end_sec"] - first["start_sec"]
-        first["source_type"] = "component_parent"
+        if "detection_score" in group.columns:
+            first["detection_score"] = float(pd.to_numeric(group["detection_score"], errors="coerce").max())
+        first["source_type"] = "parent_aggregated" if len(group) > 1 else first.get("source_type", "component")
         first["is_component"] = False
         rows.append(first)
     collapsed = pd.DataFrame(rows, columns=events.columns) if rows else events.iloc[0:0].copy()
@@ -130,9 +157,11 @@ def match_events(
     pred_events: pd.DataFrame,
     iou_threshold: float = 0.3,
     overlap_threshold: float = 0.3,
+    parent_aware: bool = True,
+    clusterable_only: bool = False,
 ) -> tuple[list[tuple[int, int, float]], list[int], list[int]]:
     """Greedily match ground-truth events to predictions by temporal overlap."""
-    preds = _normal_events(pred_events)
+    preds = _prediction_view(pred_events, parent_aware=parent_aware, clusterable_only=clusterable_only)
     candidates: list[tuple[float, int, int]] = []
     for gt_idx, gt in enumerate(gt_events):
         for pred_idx, pred in preds.iterrows():
@@ -163,14 +192,18 @@ def compute_detection_metrics(
     pred_events: pd.DataFrame,
     iou_threshold: float = 0.3,
     overlap_threshold: float = 0.3,
+    parent_aware: bool = True,
+    clusterable_only: bool = False,
 ) -> DetectionMetrics:
     """Compute temporal event detection metrics."""
-    preds = _normal_events(pred_events)
+    preds = _prediction_view(pred_events, parent_aware=parent_aware, clusterable_only=clusterable_only)
     matches, unmatched_gt, unmatched_pred = match_events(
         gt_events,
-        preds,
+        pred_events,
         iou_threshold=iou_threshold,
         overlap_threshold=overlap_threshold,
+        parent_aware=parent_aware,
+        clusterable_only=clusterable_only,
     )
     true_positives = len(matches)
     false_positives = len(unmatched_pred)
@@ -297,7 +330,7 @@ def compute_annotation_assistant_metrics(
     source = df.get("source_type", pd.Series(["original"] * len(df))).fillna("original")
     cluster_ids = pd.to_numeric(df.get("cluster_id"), errors="coerce")
     normal_clustered = (
-        ~source.isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})
+        ~source.isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review", "component_review", "low_detection_confidence"})
         & cluster_ids.notna()
         & (cluster_ids != -1)
     )
@@ -357,7 +390,7 @@ def compute_clustering_metrics(matched_predictions: pd.DataFrame) -> ClusteringM
         return ClusteringMetrics(0, 0, 0, 0.0, 0.0, None, None, 0.0, 0.0, 0.0)
 
     df = matched_predictions.copy()
-    df = df[~df["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review"})]
+    df = df[~df["source_type"].fillna("original").isin({"mixed", "low_confidence_noise", "ambiguous_review", "short_review", "component_review", "low_detection_confidence"})]
     df = df[df["matched_gt_label"].fillna("") != ""]
     cluster_ids = pd.to_numeric(df["cluster_id"], errors="coerce")
     n_noise = int(cluster_ids.isna().sum() + (cluster_ids == -1).sum())
@@ -405,7 +438,7 @@ def compute_polyphony_metrics(events_df: pd.DataFrame) -> PolyphonyMetrics:
     n_total = len(events_df)
     source = events_df["source_type"].fillna("original")
     n_mixed = int((source == "mixed").sum())
-    n_components = int((source == "component").sum())
+    n_components = int(events_df["is_component"].fillna(False).astype(bool).sum())
     n_original = int((source == "original").sum())
     purity = pd.to_numeric(events_df["purity_score"], errors="coerce").dropna()
     return PolyphonyMetrics(

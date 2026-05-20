@@ -24,6 +24,7 @@ from biosound_cluster.evaluation.metrics import (
     compute_global_score,
     compute_polyphony_metrics,
 )
+from biosound_cluster.evaluation.error_audit import audit_false_positives
 from biosound_cluster.evaluation.reporting import write_evaluation_report
 
 LOGGER = logging.getLogger(__name__)
@@ -197,7 +198,9 @@ def evaluate_dcase2024(
         max_files=max_files,
     )
     per_file_rows: list[dict[str, object]] = []
-    detection_items: list[DetectionMetrics] = []
+    detection_raw_items: list[DetectionMetrics] = []
+    detection_parent_items: list[DetectionMetrics] = []
+    detection_clusterable_items: list[DetectionMetrics] = []
     matched_frames: list[pd.DataFrame] = []
     all_events_frames: list[pd.DataFrame] = []
     failed_files: list[dict[str, str]] = []
@@ -211,11 +214,27 @@ def evaluate_dcase2024(
             if not events_df.empty:
                 events_df["file_id"] = item.file_id
                 all_events_frames.append(events_df)
+            detection_raw = compute_detection_metrics(
+                gt_events,
+                events_df,
+                iou_threshold=iou_threshold,
+                overlap_threshold=overlap_threshold,
+                parent_aware=False,
+            )
             detection = compute_detection_metrics(
                 gt_events,
                 events_df,
                 iou_threshold=iou_threshold,
                 overlap_threshold=overlap_threshold,
+                parent_aware=True,
+            )
+            detection_clusterable = compute_detection_metrics(
+                gt_events,
+                events_df,
+                iou_threshold=iou_threshold,
+                overlap_threshold=overlap_threshold,
+                parent_aware=True,
+                clusterable_only=True,
             )
             matched = assign_predictions_to_ground_truth(item.file_id, gt_events, events_df)
             matched_frames.append(matched)
@@ -230,8 +249,13 @@ def evaluate_dcase2024(
             n_low_confidence_noise = _count_low_confidence_noise(events_df)
             n_ambiguous_review = _count_ambiguous_review(events_df)
             n_short_review = _count_short_review(events_df)
+            score_raw = compute_global_score(detection_raw, clustering, polyphony)
             score = compute_global_score(detection, clustering, polyphony)
-            detection_items.append(detection)
+            score_clusterable = compute_global_score(detection_clusterable, clustering, polyphony)
+            detection_raw_items.append(detection_raw)
+            detection_parent_items.append(detection)
+            detection_clusterable_items.append(detection_clusterable)
+            routing = _routing_summary(events_df)
             per_file_rows.append(
                 {
                     "file_id": item.file_id,
@@ -240,11 +264,17 @@ def evaluate_dcase2024(
                     "split": item.split,
                     "subset": item.subset or "",
                     "n_gt": detection.n_gt,
-                    "n_pred": detection.n_pred,
-                    "precision": detection.precision,
-                    "recall": detection.recall,
-                    "detection_f1": detection.f1,
-                    "mean_iou": detection.mean_iou,
+                    "n_pred": detection_clusterable.n_pred,
+                    "precision": detection_clusterable.precision,
+                    "recall": detection_clusterable.recall,
+                    "detection_f1": detection_clusterable.f1,
+                    "mean_iou": detection_clusterable.mean_iou,
+                    "n_pred_raw": detection_raw.n_pred,
+                    "precision_raw": detection_raw.precision,
+                    "recall_raw": detection_raw.recall,
+                    "n_pred_parent_aware": detection.n_pred,
+                    "precision_parent_aware": detection.precision,
+                    "recall_parent_aware": detection.recall,
                     "weighted_cluster_purity": clustering.weighted_cluster_purity,
                     "normal_cluster_precision": assistant_metrics.get("normal_cluster_precision"),
                     "global_recall_any_folder": assistant_metrics.get("global_recall_any_folder"),
@@ -257,7 +287,11 @@ def evaluate_dcase2024(
                     "n_ambiguous_review": n_ambiguous_review,
                     "n_short_review_events": n_short_review,
                     "n_component_events": polyphony.n_component_events,
-                    "final_score_100": score.final_score_100,
+                    "final_score_100_raw": score_raw.final_score_100,
+                    "final_score_100_parent_aware": score.final_score_100,
+                    "final_score_100_clusterable": score_clusterable.final_score_100,
+                    "final_score_100": score_clusterable.final_score_100,
+                    **routing,
                     "run_dir": str(run_dir),
                 }
             )
@@ -265,7 +299,9 @@ def evaluate_dcase2024(
             LOGGER.exception("Failed to evaluate %s", item.audio_path)
             failed_files.append({"file_id": item.file_id, "audio_path": str(item.audio_path), "error": str(exc)})
 
-    detection_agg = aggregate_detection_metrics(detection_items)
+    detection_raw_agg = aggregate_detection_metrics(detection_raw_items)
+    detection_agg = aggregate_detection_metrics(detection_parent_items)
+    detection_clusterable_agg = aggregate_detection_metrics(detection_clusterable_items)
     matched_all = pd.concat(matched_frames, ignore_index=True) if matched_frames else pd.DataFrame()
     events_all = pd.concat(all_events_frames, ignore_index=True) if all_events_frames else pd.DataFrame()
     clustering_agg = compute_clustering_metrics(matched_all)
@@ -278,7 +314,10 @@ def evaluate_dcase2024(
         iou_threshold=iou_threshold,
         overlap_threshold=overlap_threshold,
     )
+    score_raw_agg = compute_global_score(detection_raw_agg, clustering_agg, polyphony_agg)
     score_agg = compute_global_score(detection_agg, clustering_agg, polyphony_agg)
+    score_clusterable_agg = compute_global_score(detection_clusterable_agg, clustering_agg, polyphony_agg)
+    routing_agg = _routing_summary(events_all)
 
     per_file_csv = output_dir / "per_file_metrics.csv"
     matched_csv = output_dir / "matched_predictions.csv"
@@ -286,9 +325,13 @@ def evaluate_dcase2024(
     report_md = output_dir / "evaluation_report.md"
     pd.DataFrame(per_file_rows).to_csv(per_file_csv, index=False)
     matched_all.to_csv(matched_csv, index=False)
+    audit = audit_false_positives(matched_all, events_all, output_dir)
 
     summary = {
-        "final_score_100": score_agg.final_score_100,
+        "final_score_100": score_clusterable_agg.final_score_100,
+        "final_score_100_raw": score_raw_agg.final_score_100,
+        "final_score_100_parent_aware": score_agg.final_score_100,
+        "final_score_100_clusterable": score_clusterable_agg.final_score_100,
         "dataset": {
             "dataset_dir": str(dataset_dir),
             "annotations_dir": str(annotations_dir) if annotations_dir else "",
@@ -298,13 +341,21 @@ def evaluate_dcase2024(
             "files_discovered": len(files),
             "failed_files": failed_files,
         },
-        "detection": detection_agg.to_dict(),
+        "detection": detection_clusterable_agg.to_dict(),
+        "detection_raw_events": detection_raw_agg.to_dict(),
+        "detection_parent_aware": detection_agg.to_dict(),
+        "detection_clusterable": detection_clusterable_agg.to_dict(),
         "clustering": clustering_agg.to_dict(),
         "polyphony": polyphony_agg.to_dict(),
+        "routing": routing_agg,
         "noise_filtering": noise_filtering,
         "short_event_review": short_event_review,
         "assistant_metrics": assistant_metrics,
         "score": score_agg.to_dict(),
+        "score_raw": score_raw_agg.to_dict(),
+        "score_parent_aware": score_agg.to_dict(),
+        "score_clusterable": score_clusterable_agg.to_dict(),
+        "false_positive_audit": audit,
         "outputs": {
             "per_file_metrics_csv": str(per_file_csv),
             "matched_predictions_csv": str(matched_csv),
@@ -318,7 +369,7 @@ def evaluate_dcase2024(
         detection=detection_agg,
         clustering=clustering_agg,
         polyphony=polyphony_agg,
-        score=score_agg,
+        score=score_clusterable_agg,
     )
     return summary
 
@@ -528,4 +579,45 @@ def _short_review_summary(events_df: pd.DataFrame) -> dict[str, object]:
         "enabled": "is_short_review_event" in events_df.columns,
         "n_short_review_events": n_short,
         "short_review_rate": float(n_short / len(events_df)) if len(events_df) else 0.0,
+    }
+
+
+def _routing_summary(events_df: pd.DataFrame) -> dict[str, object]:
+    if events_df.empty:
+        return {
+            "n_total_events": 0,
+            "n_clusterable_events": 0,
+            "n_low_detection_confidence": 0,
+            "n_component_review": 0,
+            "n_mixed": 0,
+            "n_noise_unknown": 0,
+            "clusterable_ratio": 0.0,
+            "component_events_total": 0,
+            "component_events_clusterable": 0,
+            "component_events_review": 0,
+            "component_clusterable_ratio": 0.0,
+        }
+    source = events_df.get("source_type", pd.Series(["original"] * len(events_df))).fillna("original")
+    clusterable = events_df.get("clusterable", pd.Series([True] * len(events_df))).fillna(True).astype(bool)
+    is_component = events_df.get("is_component", pd.Series([False] * len(events_df))).fillna(False).astype(bool)
+    component_review = events_df.get("is_component_review", pd.Series([False] * len(events_df))).fillna(False).astype(bool) | (source == "component_review")
+    low_detection = events_df.get("is_low_detection_confidence", pd.Series([False] * len(events_df))).fillna(False).astype(bool) | (source == "low_detection_confidence")
+    mixed = events_df.get("is_mixed", pd.Series([False] * len(events_df))).fillna(False).astype(bool) | (source == "mixed")
+    noise_unknown = events_df.get("is_noise", pd.Series([False] * len(events_df))).fillna(False).astype(bool) | (source == "low_confidence_noise")
+    component_clusterable = is_component & clusterable & ~component_review
+    return {
+        "n_total_events": int(len(events_df)),
+        "n_clusterable_events": int((clusterable & ~mixed & ~component_review & ~low_detection).sum()),
+        "n_component_events_total": int(is_component.sum()),
+        "n_component_events_clusterable": int(component_clusterable.sum()),
+        "n_component_events_review": int((is_component & component_review).sum()),
+        "n_low_detection_confidence": int(low_detection.sum()),
+        "n_component_review": int(component_review.sum()),
+        "n_mixed": int(mixed.sum()),
+        "n_noise_unknown": int(noise_unknown.sum()),
+        "clusterable_ratio": float((clusterable & ~mixed & ~component_review & ~low_detection).sum() / len(events_df)),
+        "component_events_total": int(is_component.sum()),
+        "component_events_clusterable": int(component_clusterable.sum()),
+        "component_events_review": int((is_component & component_review).sum()),
+        "component_clusterable_ratio": float(component_clusterable.sum() / max(int(is_component.sum()), 1)),
     }

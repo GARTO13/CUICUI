@@ -26,6 +26,7 @@ def write_evaluation_report(
     """Write a human-readable Markdown evaluation report."""
     dataset = summary.get("dataset", {})
     noise_filtering = summary.get("noise_filtering", {})
+    routing = summary.get("routing", {})
     short_event_review = summary.get("short_event_review", {})
     assistant_metrics = summary.get("assistant_metrics", {})
     stability = assistant_metrics.get("cluster_stability_summary", {}) or {}
@@ -34,7 +35,9 @@ def write_evaluation_report(
         "",
         "## Summary",
         "",
-        f"Final score: {score.final_score_100:.1f} / 100",
+        f"Final score (clusterable): {summary.get('final_score_100_clusterable', score.final_score_100):.1f} / 100",
+        f"Raw score: {summary.get('final_score_100_raw', 0.0):.1f} / 100",
+        f"Parent-aware score: {summary.get('final_score_100_parent_aware', 0.0):.1f} / 100",
         "",
         "## Dataset",
         "",
@@ -50,6 +53,19 @@ def write_evaluation_report(
         f"Recall: {detection.recall:.3f}",
         f"F1: {detection.f1:.3f}",
         f"Mean IoU: {detection.mean_iou:.3f}",
+        "",
+        "Raw score penalizes every separated component as an independent prediction.",
+        "Parent-aware score evaluates temporal detection before component splitting.",
+        "Clusterable score estimates what the researcher sees in normal clusters.",
+        "",
+        "## Routing",
+        "",
+        f"Total events: {routing.get('n_total_events', 0)}",
+        f"Clusterable events: {routing.get('n_clusterable_events', 0)}",
+        f"Component review events: {routing.get('n_component_review', 0)}",
+        f"Mixed events: {routing.get('n_mixed', 0)}",
+        f"Low detection confidence: {routing.get('n_low_detection_confidence', 0)}",
+        f"Component clusterable ratio: {routing.get('component_clusterable_ratio', 0.0):.3f}",
         "",
         "## Clustering",
         "",
@@ -126,7 +142,9 @@ def print_evaluation_summary(summary: dict, console: Console | None = None) -> N
     table = Table(title="BioSound DCASE Evaluation")
     table.add_column("Metric", style="bold")
     table.add_column("Value")
-    table.add_row("Final score", f"{summary.get('final_score_100', 0.0):.1f} / 100")
+    table.add_row("Final score (clusterable)", f"{summary.get('final_score_100_clusterable', summary.get('final_score_100', 0.0)):.1f} / 100")
+    table.add_row("Score raw", f"{summary.get('final_score_100_raw', 0.0):.1f} / 100")
+    table.add_row("Score parent-aware", f"{summary.get('final_score_100_parent_aware', 0.0):.1f} / 100")
     table.add_row("Detection F1", f"{detection.get('f1', 0.0):.3f}")
     table.add_row("Precision", f"{detection.get('precision', 0.0):.3f}")
     table.add_row("Recall", f"{detection.get('recall', 0.0):.3f}")

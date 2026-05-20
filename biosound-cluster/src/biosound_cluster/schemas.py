@@ -61,6 +61,20 @@ class AudioEvent:
     acoustic_prefamily: str | None = None
     cluster_stability_score: float | None = None
     representative_score: float | None = None
+    detection_score: float | None = None
+    event_snr_db: float | None = None
+    active_band_fraction: float | None = None
+    spectral_flux_score: float | None = None
+    stationarity_score: float | None = None
+    component_energy_ratio: float | None = None
+    component_snr_db: float | None = None
+    component_compactness: float | None = None
+    component_quality_score: float | None = None
+    is_component_review: bool = False
+    component_rank_in_parent: int | None = None
+    clusterable: bool = True
+    routing_reason: str | None = None
+    is_low_detection_confidence: bool = False
     separated_audio: np.ndarray | None = field(default=None, repr=False, compare=False)
     context_audio: np.ndarray | None = field(default=None, repr=False, compare=False)
 

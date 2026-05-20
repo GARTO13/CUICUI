@@ -18,6 +18,7 @@ from biosound_cluster.evaluation.dcase2024 import (
     download_dcase2024_annotations,
     evaluate_dcase2024,
 )
+from biosound_cluster.evaluation.calibration import calibrate_routing_thresholds_from_dcase
 from biosound_cluster.evaluation.reporting import print_evaluation_summary
 from biosound_cluster.evaluation.tuning import tune_dcase2024
 from biosound_cluster.logging_utils import configure_logging
@@ -46,6 +47,7 @@ def run(
     disable_segmentation_refinement: bool = typer.Option(False, "--disable-segmentation-refinement", help="Disable boundary refinement and temporal duplicate removal."),
     min_cluster_size: int = typer.Option(10, "--min-cluster-size", help="Pipeline HDBSCAN minimum cluster size."),
     disable_polyphony_handling: bool = typer.Option(False, "--disable-polyphony-handling", help="Disable pipeline polyphony handling."),
+    legacy_polyphony_routing: bool = typer.Option(False, "--legacy-polyphony-routing", help="Use permissive pre-v2 component routing."),
     disable_noise_filtering: bool = typer.Option(False, "--disable-noise-filtering", help="Disable low-confidence noise routing."),
     noise_mode: str = typer.Option("balanced", "--noise-mode", help="Noise filtering mode: exploratory, balanced, or conservative."),
     min_quality_for_clustering: float = typer.Option(0.55, "--min-quality-for-clustering", help="Minimum acoustic quality score sent to clustering."),
@@ -140,6 +142,14 @@ def run(
         enable_denoiser=enable_denoiser,
         denoiser_name=denoiser_name,
     )
+    if legacy_polyphony_routing:
+        config.enable_component_explosion_control = False
+        config.polyphony_split_requires_low_overlap = False
+        config.polyphony_split_requires_compact_masks = False
+        config.max_components_for_clustering_per_parent = config.max_components_per_event
+        config.min_component_purity_for_clustering_strict = config.min_purity_for_clustering
+        config.min_component_quality_for_clustering = 0.0
+        config.min_component_snr_db_for_clustering = 0.0
     if compare_noise_modes:
         comparison = compare_dcase2024_noise_modes(
             dataset_dir=dataset_dir,
@@ -217,6 +227,22 @@ def _print_tuning(tuning: dict) -> None:
     console.print(f"Best score: {float(tuning.get('best_score_100', 0.0)):.1f} / 100")
     console.print(f"Results CSV: {tuning.get('results_csv')}")
     console.print(f"Best config: {tuning.get('best_config_json')}")
+
+
+def calibrate(
+    eval_dir: Path = typer.Option(..., "--eval-dir", help="Existing evaluation directory."),
+    output_dir: Path = typer.Option(..., "--output-dir", help="Calibration output directory."),
+    min_recall_retention: float = typer.Option(0.85, "--min-recall-retention", help="Minimum retained true-positive proxy."),
+) -> None:
+    result = calibrate_routing_thresholds_from_dcase(eval_dir, output_dir, min_recall_retention)
+    console.print("[bold]Routing calibration complete[/bold]")
+    console.print(f"Results CSV: {result.get('results_csv')}")
+    console.print(f"Recommended thresholds: {result.get('recommended_thresholds_json')}")
+
+
+def calibrate_main() -> None:
+    """Entry point for routing-threshold calibration."""
+    typer.run(calibrate)
 
 
 def main() -> None:

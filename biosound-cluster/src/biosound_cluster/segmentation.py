@@ -269,8 +269,24 @@ def detect_candidate_events(audio: np.ndarray, sr: int, config: BioSoundConfig) 
         split = split[: config.max_events]
 
     events: list[AudioEvent] = []
+    frame_times = librosa.frames_to_time(np.arange(min_len), sr=sr, hop_length=config.hop_length)
+    snr_values = rms_db[:min_len] - noise_floor[:min_len]
+    flux_norm = flux / (float(np.percentile(flux, 95)) + 1e-9) if flux.size else np.zeros(min_len, dtype=float)
     for idx, (start, end) in enumerate(split):
         stats = compute_event_stats(audio, sr, start, end)
+        frame_mask = (frame_times >= start) & (frame_times <= end)
+        if np.any(frame_mask):
+            mean_snr = float(np.mean(snr_values[frame_mask]))
+            mean_flux = float(np.mean(np.clip(flux_norm[frame_mask], 0.0, 1.0)))
+            active_fraction = float(np.mean(active[frame_mask]))
+            detection_score = float(np.clip(0.45 * (mean_snr / 20.0) + 0.35 * mean_flux + 0.20 * active_fraction, 0.0, 1.0))
+            stationarity = float(1.0 - np.clip(np.std(snr_values[frame_mask]) / 12.0, 0.0, 1.0))
+        else:
+            mean_snr = 0.0
+            mean_flux = 0.0
+            active_fraction = 0.0
+            detection_score = 0.0
+            stationarity = 1.0
         events.append(
             AudioEvent(
                 event_id=f"event_{idx:06d}",
@@ -280,6 +296,11 @@ def detect_candidate_events(audio: np.ndarray, sr: int, config: BioSoundConfig) 
                 rms_db=stats["rms_db"],
                 peak_db=stats["peak_db"],
                 spectral_centroid=stats["spectral_centroid"],
+                detection_score=detection_score,
+                event_snr_db=mean_snr,
+                active_band_fraction=active_fraction,
+                spectral_flux_score=mean_flux,
+                stationarity_score=stationarity,
             )
         )
     return events

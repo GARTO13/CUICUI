@@ -31,6 +31,9 @@ class TFComponent:
     bandwidth_hz: float
     mask: np.ndarray
     purity_score: float
+    compactness: float = 0.0
+    snr_db: float = 0.0
+    quality_score: float = 0.0
 
 
 def _stft_params(clip: np.ndarray, config: BioSoundConfig) -> tuple[int, int]:
@@ -106,25 +109,76 @@ def find_tf_components(
         isolation = float(energy / bbox_energy)
         bbox_area = max(1, (f1 - f0 + 1) * (t1 - t0 + 1))
         compactness = float(area / bbox_area)
+        background = stft_mag[np.logical_not(component_mask)]
+        noise = float(np.median(np.square(background)) + 1e-12) if background.size else 1e-12
+        snr_db = float(10.0 * np.log10((energy / max(area, 1)) / noise))
         share_score = min(1.0, energy_ratio / max(config.min_component_energy_ratio, 1e-6))
         purity_score = float(np.clip(0.45 * isolation + 0.35 * share_score + 0.20 * compactness, 0.0, 1.0))
-        components.append(
-            TFComponent(
-                component_id=len(components),
-                time_start_frame=t0,
-                time_end_frame=t1,
-                freq_start_bin=f0,
-                freq_end_bin=f1,
-                area=area,
-                energy=energy,
-                energy_ratio=energy_ratio,
-                duration_sec=duration_sec,
-                bandwidth_hz=bandwidth_hz,
-                mask=component_mask,
-                purity_score=purity_score,
-            )
+        component = TFComponent(
+            component_id=len(components),
+            time_start_frame=t0,
+            time_end_frame=t1,
+            freq_start_bin=f0,
+            freq_end_bin=f1,
+            area=area,
+            energy=energy,
+            energy_ratio=energy_ratio,
+            duration_sec=duration_sec,
+            bandwidth_hz=bandwidth_hz,
+            mask=component_mask,
+            purity_score=purity_score,
+            compactness=compactness,
+            snr_db=snr_db,
         )
+        component.quality_score = compute_component_quality_score(component, config)
+        components.append(component)
     return components
+
+
+def compute_component_quality_score(component: TFComponent, config: BioSoundConfig) -> float:
+    """
+    Score between 0 and 1.
+    Rewards energetic, compact, clean, low-overlap components.
+    """
+    purity_score = float(np.clip(component.purity_score, 0.0, 1.0))
+    snr_score = float(np.clip(component.snr_db / max(config.min_component_snr_db_for_clustering * 2.0, 1e-6), 0.0, 1.0))
+    energy_ratio_score = float(np.clip(component.energy_ratio / max(config.min_component_energy_ratio_for_clustering * 2.0, 1e-6), 0.0, 1.0))
+    compactness_score = float(np.clip(component.compactness / max(config.min_component_compactness * 3.0, 1e-6), 0.0, 1.0))
+    duration_score = float(np.clip(component.duration_sec / max(config.component_min_duration * 3.0, 1e-6), 0.0, 1.0))
+    return float(
+        np.clip(
+            0.30 * purity_score
+            + 0.25 * snr_score
+            + 0.20 * energy_ratio_score
+            + 0.15 * compactness_score
+            + 0.10 * duration_score,
+            0.0,
+            1.0,
+        )
+    )
+
+
+def should_component_enter_clustering(
+    component: TFComponent,
+    rank_in_parent: int,
+    config: BioSoundConfig,
+) -> tuple[bool, str]:
+    """Return whether a separated component is reliable enough for normal clustering."""
+    if not config.enable_component_explosion_control:
+        return True, "legacy_polyphony_routing"
+    if rank_in_parent >= config.max_components_for_clustering_per_parent:
+        return False, "component_rank_exceeds_clustering_limit"
+    if component.purity_score < config.min_component_purity_for_clustering_strict:
+        return False, "component_purity_below_threshold"
+    if component.energy_ratio < config.min_component_energy_ratio_for_clustering:
+        return False, "component_energy_ratio_below_threshold"
+    if component.snr_db < config.min_component_snr_db_for_clustering:
+        return False, "component_snr_below_threshold"
+    if component.compactness < config.min_component_compactness:
+        return False, "component_compactness_below_threshold"
+    if component.quality_score < config.min_component_quality_for_clustering:
+        return False, "component_quality_below_threshold"
+    return True, "clusterable_component"
 
 
 def filter_components(components: list[TFComponent], config: BioSoundConfig) -> list[TFComponent]:
@@ -142,7 +196,8 @@ def filter_components(components: list[TFComponent], config: BioSoundConfig) -> 
         and component.energy_ratio >= config.min_component_energy_ratio
     ]
     filtered.sort(key=lambda component: component.energy, reverse=True)
-    filtered = filtered[: config.max_components_per_event]
+    max_export = config.max_components_for_export_per_parent if config.enable_component_explosion_control else config.max_components_per_event
+    filtered = filtered[: max_export]
     for idx, component in enumerate(filtered):
         component.component_id = idx
     return filtered
@@ -266,16 +321,27 @@ def _analyze_one_event(
             or mean_purity >= config.min_component_purity_for_separation
         )
     )
+    if config.enable_component_explosion_control:
+        if config.mark_parent_mixed_when_too_many_components and len(components) > config.max_significant_components_before_mixed:
+            return [], [_mark_mixed(event, len(components), polyphony_score, mean_purity, "too_many_significant_components")]
+        if config.polyphony_split_requires_low_overlap and overlap_ratio > config.strict_max_overlap_ratio_for_split:
+            return [], [_mark_mixed(event, len(components), polyphony_score, mean_purity, "components_too_overlapping")]
+        if config.polyphony_split_requires_compact_masks and any(
+            component.compactness < config.min_component_compactness for component in pure_components
+        ):
+            return [], [_mark_mixed(event, len(components), polyphony_score, mean_purity, "component_masks_not_compact")]
+
     if separable and len(pure_components) >= 2:
+        ordered = sorted(pure_components, key=lambda item: item.quality_score, reverse=True)
         component_events = [
-            _component_event(audio, sr, clip, stft_complex, event, component, len(components), polyphony_score, config)
-            for component in pure_components
+            _component_event(audio, sr, clip, stft_complex, event, component, len(components), polyphony_score, config, rank)
+            for rank, component in enumerate(ordered)
         ]
         component_events = [component_event for component_event in component_events if component_event is not None]
         if component_events:
             return component_events, []
 
-    return [], [_mark_mixed(event, len(components), polyphony_score, mean_purity)]
+    return [], [_mark_mixed(event, len(components), polyphony_score, mean_purity, "not_separable")]
 
 
 def _component_event(
@@ -288,6 +354,7 @@ def _component_event(
     n_components: int,
     polyphony_score: float,
     config: BioSoundConfig,
+    rank_in_parent: int = 0,
 ) -> AudioEvent | None:
     separated = separate_component_audio(clip, stft_complex, component, config)
     _, hop_length = _stft_params(clip, config)
@@ -303,7 +370,8 @@ def _component_event(
     start_sec = parent.start_sec + offset_start
     end_sec = parent.start_sec + offset_end
     stats = _audio_stats(separated_clip, sr)
-    return AudioEvent(
+    clusterable, reason = should_component_enter_clustering(component, rank_in_parent, config)
+    event = AudioEvent(
         event_id=f"{parent.event_id}_component_{component.component_id}",
         parent_event_id=parent.event_id,
         component_id=component.component_id,
@@ -319,10 +387,19 @@ def _component_event(
         n_components=n_components,
         polyphony_score=polyphony_score,
         purity_score=component.purity_score,
-        source_type="component",
+        source_type="component" if clusterable else "component_review",
+        component_energy_ratio=component.energy_ratio,
+        component_snr_db=component.snr_db,
+        component_compactness=component.compactness,
+        component_quality_score=component.quality_score,
+        is_component_review=not clusterable,
+        component_rank_in_parent=rank_in_parent,
+        clusterable=clusterable,
+        routing_reason=reason,
         separated_audio=separated_clip,
         context_audio=extract_event_audio(audio, sr, parent),
     )
+    return event
 
 
 def _mark_mixed(
@@ -330,6 +407,7 @@ def _mark_mixed(
     n_components: int,
     polyphony_score: float,
     purity_score: float,
+    routing_reason: str | None = None,
 ) -> AudioEvent:
     mixed = replace(event)
     mixed.cluster_id = None
@@ -342,6 +420,8 @@ def _mark_mixed(
     mixed.polyphony_score = polyphony_score
     mixed.purity_score = purity_score
     mixed.source_type = "mixed"
+    mixed.clusterable = False
+    mixed.routing_reason = routing_reason or "mixed_overlapping"
     return mixed
 
 

@@ -34,6 +34,7 @@ biosound-cluster = "biosound_cluster.cli:main"
 biosound-api = "biosound_cluster.api:main"
 biosound-evaluate-dcase = "biosound_cluster.evaluation.cli:main"
 biosound-tune-dcase = "biosound_cluster.evaluation.cli:tune_main"
+biosound-calibrate-routing = "biosound_cluster.evaluation.cli:calibrate_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

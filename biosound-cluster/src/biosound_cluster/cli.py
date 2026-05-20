@@ -45,6 +45,7 @@ def run(
     recording_start_time: Optional[str] = typer.Option(None, "--recording-start-time", help="Recording start time as ISO-8601, e.g. 2026-05-20T06:30:00+02:00."),
     recording_timezone: Optional[str] = typer.Option(None, "--recording-timezone", help="Optional timezone name stored in metadata, e.g. Europe/Paris."),
     disable_polyphony_handling: bool = typer.Option(False, "--disable-polyphony-handling", help="Disable mixed/overlapping sound handling."),
+    legacy_polyphony_routing: bool = typer.Option(False, "--legacy-polyphony-routing", help="Use permissive pre-v2 component routing."),
     component_snr_db: float = typer.Option(10.0, "--component-snr-db", help="SNR threshold for time-frequency components."),
     min_purity_for_clustering: float = typer.Option(0.55, "--min-purity-for-clustering", help="Minimum component purity score sent to clustering."),
     max_components_per_event: int = typer.Option(4, "--max-components-per-event", help="Maximum separated components per detected event."),
@@ -122,6 +123,14 @@ def run(
         enable_denoiser=enable_denoiser,
         denoiser_name=denoiser_name,
     )
+    if legacy_polyphony_routing:
+        config.enable_component_explosion_control = False
+        config.polyphony_split_requires_low_overlap = False
+        config.polyphony_split_requires_compact_masks = False
+        config.max_components_for_clustering_per_parent = config.max_components_per_event
+        config.min_component_purity_for_clustering_strict = config.min_purity_for_clustering
+        config.min_component_quality_for_clustering = 0.0
+        config.min_component_snr_db_for_clustering = 0.0
     from biosound_cluster.pipeline import process_audio_file
 
     result = process_audio_file(input_path, output, config)

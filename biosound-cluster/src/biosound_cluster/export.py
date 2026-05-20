@@ -69,6 +69,20 @@ EVENT_FIELDS = [
     "acoustic_prefamily",
     "cluster_stability_score",
     "representative_score",
+    "detection_score",
+    "event_snr_db",
+    "active_band_fraction",
+    "spectral_flux_score",
+    "stationarity_score",
+    "component_energy_ratio",
+    "component_snr_db",
+    "component_compactness",
+    "component_quality_score",
+    "is_component_review",
+    "component_rank_in_parent",
+    "clusterable",
+    "routing_reason",
+    "is_low_detection_confidence",
 ]
 
 CLUSTER_FIELDS = [
@@ -273,11 +287,13 @@ def _write_report(
     mixed_events: list[AudioEvent],
     low_confidence_noise_events: list[AudioEvent],
     short_review_events: list[AudioEvent],
+    component_review_events: list[AudioEvent],
     config: BioSoundConfig,
 ) -> None:
     n_components = sum(1 for event in events if event.is_component)
+    n_component_review = len(component_review_events)
     n_originals = sum(1 for event in events if event.source_type == "original")
-    all_events = events + mixed_events + low_confidence_noise_events + short_review_events
+    all_events = events + mixed_events + low_confidence_noise_events + short_review_events + component_review_events
     ambiguous_events = [event for event in low_confidence_noise_events if event.source_type == "ambiguous_review"]
     cluster_sizes = [cluster.size for cluster in clusters]
     mixed_folder = f"mixed_overlapping_size_{len(mixed_events):03d}" if mixed_events else "none"
@@ -289,6 +305,11 @@ def _write_report(
     short_review_folder = (
         f"short_events_review_size_{len(short_review_events):03d}"
         if short_review_events
+        else "none"
+    )
+    component_review_folder = (
+        f"{config.component_review_folder_name}_size_{len(component_review_events):03d}"
+        if component_review_events
         else "none"
     )
     lines = [
@@ -308,6 +329,7 @@ def _write_report(
         f"- Acoustic clusters: {len(clusters)}",
         f"- Noise/unknown events: {n_noise}",
         f"- Low-confidence noise events excluded from clustering: {len(low_confidence_noise_events)}",
+        f"- Component review events excluded from clustering: {n_component_review}",
         f"- Ambiguous review events excluded from clustering: {len(ambiguous_events)}",
         f"- Short review events excluded from main clusters: {len(short_review_events)}",
         f"- Mean cluster size: {float(np.mean(cluster_sizes)):.2f}" if cluster_sizes else "- Mean cluster size: n/a",
@@ -339,10 +361,19 @@ def _write_report(
         f"- Polyphony handling enabled: {str(config.enable_polyphony_handling).lower()}",
         f"- Mixed overlapping events excluded from clustering: {len(mixed_events)}",
         f"- Separated component events sent to clustering: {n_components}",
+        f"- Separated component events routed to review: {n_component_review}",
         f"- Original clean events sent to clustering: {n_originals}",
         f"- Mixed folder: `{mixed_folder}`",
         "",
         "Mixed events are not necessarily useless. They may contain real biological signals, but they require expert review because several acoustic sources overlap.",
+        "",
+        "## Component review",
+        "",
+        f"- Component events sent to clustering: {n_components}",
+        f"- Component events routed to review: {n_component_review}",
+        f"- Parents marked mixed instead of split: {len(mixed_events)}",
+        f"- Average component quality score: {_score_summary([event for event in events + component_review_events if event.is_component], 'component_quality_score')}",
+        f"- Component review folder: `{component_review_folder}`",
         "",
     ]
     if not events and not mixed_events and not low_confidence_noise_events and not short_review_events:
@@ -369,6 +400,8 @@ def _write_report(
             lines.append(f"- `mixed_overlapping_size_{len(mixed_events):03d}`: {len(mixed_events)} mixed/overlapping events excluded from clustering")
         if low_confidence_noise_events:
             lines.append(f"- `low_confidence_noise_size_{len(low_confidence_noise_events):03d}`: {len(low_confidence_noise_events)} low-confidence noise events excluded from clustering")
+        if component_review_events:
+            lines.append(f"- `{component_review_folder}`: {len(component_review_events)} separated components excluded from normal clustering")
         if short_review_events:
             lines.append(f"- `short_events_review_size_{len(short_review_events):03d}`: {len(short_review_events)} short events excluded from main cluster representatives")
         lines.append("")
@@ -418,6 +451,7 @@ def _write_index_html(
     mixed_events: list[AudioEvent],
     low_confidence_noise_events: list[AudioEvent],
     short_review_events: list[AudioEvent],
+    component_review_events: list[AudioEvent],
 ) -> None:
     events_by_id = {event.event_id: event for event in events}
     cards: list[str] = []
@@ -457,15 +491,28 @@ def _write_index_html(
             f'<div class="reps">{reps_html}</div>'
             "</section>"
         )
-    if low_confidence_noise_events:
-        low_noise_folder = f"low_confidence_noise_size_{len(low_confidence_noise_events):03d}"
-        ambiguous_count = sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review")
-        reps_html = "\n".join(_representative_html(event, path.parent) for event in low_confidence_noise_events[:5])
+    low_detection_events = [event for event in low_confidence_noise_events if event.source_type == "low_detection_confidence"]
+    low_confidence_review_events = [event for event in low_confidence_noise_events if event.source_type != "low_detection_confidence"]
+    if low_confidence_review_events:
+        low_noise_folder = f"low_confidence_noise_size_{len(low_confidence_review_events):03d}"
+        ambiguous_count = sum(1 for event in low_confidence_review_events if event.source_type == "ambiguous_review")
+        reps_html = "\n".join(_representative_html(event, path.parent) for event in low_confidence_review_events[:5])
         cards.append(
             '<section class="cluster low-noise">'
             "<h2>Low-confidence / ambiguous review</h2>"
-            f"<p>{len(low_confidence_noise_events)} events excluded from normal clustering; {ambiguous_count} were marked ambiguous by clusterability scoring.</p>"
+            f"<p>{len(low_confidence_review_events)} events excluded from normal clustering; {ambiguous_count} were marked ambiguous by clusterability scoring.</p>"
             f'<p><a href="{low_noise_folder}/_cluster_manifest.csv">manifest</a></p>'
+            f'<div class="reps">{reps_html}</div>'
+            "</section>"
+        )
+    if low_detection_events:
+        low_detection_folder = f"low_detection_confidence_size_{len(low_detection_events):03d}"
+        reps_html = "\n".join(_representative_html(event, path.parent) for event in low_detection_events[:5])
+        cards.append(
+            '<section class="cluster low-detection">'
+            "<h2>Low detection confidence</h2>"
+            f"<p>{len(low_detection_events)} events excluded from normal clustering by detection-score routing.</p>"
+            f'<p><a href="{low_detection_folder}/_cluster_manifest.csv">manifest</a></p>'
             f'<div class="reps">{reps_html}</div>'
             "</section>"
         )
@@ -477,6 +524,17 @@ def _write_index_html(
             "<h2>Short events review</h2>"
             f"<p>{len(short_review_events)} short events excluded from main clusters because they may be poor representatives for quick human review.</p>"
             f'<p><a href="{short_folder}/_cluster_manifest.csv">manifest</a></p>'
+            f'<div class="reps">{reps_html}</div>'
+            "</section>"
+        )
+    if component_review_events:
+        component_folder = f"component_review_size_{len(component_review_events):03d}"
+        reps_html = "\n".join(_representative_html(event, path.parent) for event in component_review_events[:5])
+        cards.append(
+            '<section class="cluster component-review">'
+            "<h2>Component review</h2>"
+            f"<p>{len(component_review_events)} separated components excluded from normal clustering by conservative routing.</p>"
+            f'<p><a href="{component_folder}/_cluster_manifest.csv">manifest</a></p>'
             f'<div class="reps">{reps_html}</div>'
             "</section>"
         )
@@ -515,13 +573,14 @@ def _write_index_html(
     <p><strong>Input:</strong> <code>{html.escape(str(input_path))}</code></p>
     <div class="summary">
       <div class="metric"><span>Duration</span><strong>{duration_sec:.2f}s</strong></div>
-      <div class="metric"><span>Events</span><strong>{len(events) + len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events)}</strong></div>
+      <div class="metric"><span>Events</span><strong>{len(events) + len(mixed_events) + len(low_confidence_noise_events) + len(short_review_events) + len(component_review_events)}</strong></div>
       <div class="metric"><span>Clusters</span><strong>{len(clusters)}</strong></div>
       <div class="metric"><span>Noise/unknown</span><strong>{n_noise}</strong></div>
       <div class="metric"><span>Mixed/overlapping</span><strong>{len(mixed_events)}</strong></div>
       <div class="metric"><span>Low-confidence noise</span><strong>{len(low_confidence_noise_events)}</strong></div>
       <div class="metric"><span>Ambiguous review</span><strong>{sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review")}</strong></div>
       <div class="metric"><span>Short review</span><strong>{len(short_review_events)}</strong></div>
+      <div class="metric"><span>Component review</span><strong>{len(component_review_events)}</strong></div>
     </div>
     <p><a href="events.csv">events.csv</a> | <a href="clusters.csv">clusters.csv</a> | <a href="report.md">report.md</a></p>
     {"".join(cards)}
@@ -583,6 +642,7 @@ def export_outputs(
     mixed_events: list[AudioEvent] | None = None,
     low_confidence_noise_events: list[AudioEvent] | None = None,
     short_review_events: list[AudioEvent] | None = None,
+    component_review_events: list[AudioEvent] | None = None,
 ) -> dict[str, Path]:
     """Export event clips, spectrograms, metadata tables, report, and HTML index."""
     root = Path(output_dir)
@@ -592,6 +652,7 @@ def export_outputs(
     mixed_events = mixed_events or []
     low_confidence_noise_events = low_confidence_noise_events or []
     short_review_events = short_review_events or []
+    component_review_events = component_review_events or []
 
     sizes: dict[int | None, int] = {}
     for event in events:
@@ -606,13 +667,26 @@ def export_outputs(
     mixed_folder = root / f"mixed_overlapping_size_{len(mixed_events):03d}" if mixed_events else None
     if mixed_folder is not None and config.export_mixed_overlapping:
         mixed_folder.mkdir(parents=True, exist_ok=True)
+    low_detection_events = [
+        event for event in low_confidence_noise_events if event.source_type == "low_detection_confidence"
+    ]
+    low_confidence_review_events = [
+        event for event in low_confidence_noise_events if event.source_type != "low_detection_confidence"
+    ]
     low_noise_folder = (
-        root / f"low_confidence_noise_size_{len(low_confidence_noise_events):03d}"
-        if low_confidence_noise_events
+        root / f"low_confidence_noise_size_{len(low_confidence_review_events):03d}"
+        if low_confidence_review_events
         else None
     )
     if low_noise_folder is not None and config.export_low_confidence_noise:
         low_noise_folder.mkdir(parents=True, exist_ok=True)
+    low_detection_folder = (
+        root / f"low_detection_confidence_size_{len(low_detection_events):03d}"
+        if low_detection_events
+        else None
+    )
+    if low_detection_folder is not None:
+        low_detection_folder.mkdir(parents=True, exist_ok=True)
     short_review_folder = (
         root / f"short_events_review_size_{len(short_review_events):03d}"
         if short_review_events
@@ -620,6 +694,13 @@ def export_outputs(
     )
     if short_review_folder is not None and config.export_short_events_review:
         short_review_folder.mkdir(parents=True, exist_ok=True)
+    component_review_folder = (
+        root / f"{config.component_review_folder_name}_size_{len(component_review_events):03d}"
+        if component_review_events
+        else None
+    )
+    if component_review_folder is not None:
+        component_review_folder.mkdir(parents=True, exist_ok=True)
 
     for folder in folder_by_key.values():
         folder.mkdir(parents=True, exist_ok=True)
@@ -633,11 +714,17 @@ def export_outputs(
         for event in mixed_events:
             _export_event_media(audio, sr, event, root, mixed_folder, config, input_path, duration_sec)
     if low_noise_folder is not None and config.export_low_confidence_noise:
-        for event in low_confidence_noise_events:
+        for event in low_confidence_review_events:
             _export_event_media(audio, sr, event, root, low_noise_folder, config, input_path, duration_sec)
+    if low_detection_folder is not None:
+        for event in low_detection_events:
+            _export_event_media(audio, sr, event, root, low_detection_folder, config, input_path, duration_sec)
     if short_review_folder is not None and config.export_short_events_review:
         for event in short_review_events:
             _export_event_media(audio, sr, event, root, short_review_folder, config, input_path, duration_sec)
+    if component_review_folder is not None:
+        for event in component_review_events:
+            _export_event_media(audio, sr, event, root, component_review_folder, config, input_path, duration_sec)
 
     events_by_id = {event.event_id: event for event in events}
     for cluster in clusters:
@@ -671,13 +758,23 @@ def export_outputs(
             index=False,
         )
     if low_noise_folder is not None and config.export_low_confidence_noise:
-        pd.DataFrame([_event_row(event) for event in low_confidence_noise_events], columns=EVENT_FIELDS).to_csv(
+        pd.DataFrame([_event_row(event) for event in low_confidence_review_events], columns=EVENT_FIELDS).to_csv(
             low_noise_folder / "_cluster_manifest.csv",
+            index=False,
+        )
+    if low_detection_folder is not None:
+        pd.DataFrame([_event_row(event) for event in low_detection_events], columns=EVENT_FIELDS).to_csv(
+            low_detection_folder / "_cluster_manifest.csv",
             index=False,
         )
     if short_review_folder is not None and config.export_short_events_review:
         pd.DataFrame([_event_row(event) for event in short_review_events], columns=EVENT_FIELDS).to_csv(
             short_review_folder / "_cluster_manifest.csv",
+            index=False,
+        )
+    if component_review_folder is not None:
+        pd.DataFrame([_event_row(event) for event in component_review_events], columns=EVENT_FIELDS).to_csv(
+            component_review_folder / "_cluster_manifest.csv",
             index=False,
         )
 
@@ -688,7 +785,7 @@ def export_outputs(
     metadata_json = root / "run_metadata.json"
     event_metadata_json = root / "event_metadata.json"
     n_noise = sum(1 for event in events if event.is_noise) + len(low_confidence_noise_events)
-    all_events = events + mixed_events + low_confidence_noise_events + short_review_events
+    all_events = events + mixed_events + low_confidence_noise_events + short_review_events + component_review_events
 
     _write_events_csv(events_csv, all_events)
     _write_clusters_csv(clusters_csv, clusters)
@@ -706,7 +803,9 @@ def export_outputs(
         "n_low_confidence_noise": len(low_confidence_noise_events),
         "n_ambiguous_review": sum(1 for event in low_confidence_noise_events if event.source_type == "ambiguous_review"),
         "n_short_review": len(short_review_events),
-        "n_component_events": sum(1 for event in events if event.is_component),
+        "n_component_review": len(component_review_events),
+        "n_component_events": sum(1 for event in all_events if event.is_component),
+        "n_component_events_clusterable": sum(1 for event in events if event.is_component),
         "n_original_events": sum(1 for event in events if event.source_type == "original"),
         "clusterability_score_summary": _score_summary(all_events, "clusterability_score"),
         "embedding_stability_score_summary": _score_summary(all_events, "embedding_stability_score"),
@@ -714,8 +813,8 @@ def export_outputs(
         "config_hash": config_fingerprint(config),
     }
     metadata_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    _write_report(report_md, input_path, duration_sec, events, clusters, n_noise, mixed_events, low_confidence_noise_events, short_review_events, config)
-    _write_index_html(index_html, input_path, duration_sec, events, clusters, n_noise, mixed_events, low_confidence_noise_events, short_review_events)
+    _write_report(report_md, input_path, duration_sec, events, clusters, n_noise, mixed_events, low_confidence_noise_events, short_review_events, component_review_events, config)
+    _write_index_html(index_html, input_path, duration_sec, events, clusters, n_noise, mixed_events, low_confidence_noise_events, short_review_events, component_review_events)
 
     return {
         "events_csv": events_csv,
@@ -739,6 +838,8 @@ def _clean_previous_outputs(root: Path) -> None:
             or child.name.startswith("noise_unknown")
             or child.name.startswith("mixed_overlapping")
             or child.name.startswith("low_confidence_noise")
+            or child.name.startswith("low_detection_confidence")
             or child.name.startswith("short_events_review")
+            or child.name.startswith("component_review")
         ):
             shutil.rmtree(child)

@@ -70,6 +70,24 @@ class BioSoundConfig:
     max_overlap_ratio_for_separation: float = 0.65
     export_original_context: bool = True
     export_mixed_overlapping: bool = True
+    enable_component_explosion_control: bool = True
+    max_components_for_clustering_per_parent: int = 2
+    max_components_for_export_per_parent: int = 4
+    min_component_purity_for_clustering_strict: float = 0.72
+    min_component_snr_db_for_clustering: float = 8.0
+    min_component_energy_ratio_for_clustering: float = 0.12
+    min_component_quality_for_clustering: float = 0.62
+    route_extra_components_to_review: bool = True
+    component_review_folder_name: str = "component_review"
+    mark_parent_mixed_when_too_many_components: bool = True
+    max_significant_components_before_mixed: int = 4
+    polyphony_split_requires_low_overlap: bool = True
+    strict_max_overlap_ratio_for_split: float = 0.45
+    polyphony_split_requires_compact_masks: bool = True
+    min_component_compactness: float = 0.15
+    enable_detection_quality_routing: bool = True
+    min_clusterable_detection_score: float = 0.35
+    route_low_detection_score_to_review: bool = True
     enable_eventness_filtering: bool = True
     min_eventness_for_clustering: float = 0.28
     min_component_eventness_for_clustering: float = 0.50
@@ -196,6 +214,28 @@ class BioSoundConfig:
             raise ValueError("min_purity_for_clustering must be in [0, 1]")
         if not 0 <= self.max_overlap_ratio_for_separation <= 1:
             raise ValueError("max_overlap_ratio_for_separation must be in [0, 1]")
+        if self.max_components_for_clustering_per_parent < 1:
+            raise ValueError("max_components_for_clustering_per_parent must be at least 1")
+        if self.max_components_for_export_per_parent < 1:
+            raise ValueError("max_components_for_export_per_parent must be at least 1")
+        if self.max_components_for_export_per_parent < self.max_components_for_clustering_per_parent:
+            raise ValueError("max_components_for_export_per_parent must be >= max_components_for_clustering_per_parent")
+        if not 0 <= self.min_component_purity_for_clustering_strict <= 1:
+            raise ValueError("min_component_purity_for_clustering_strict must be in [0, 1]")
+        if self.min_component_snr_db_for_clustering < 0:
+            raise ValueError("min_component_snr_db_for_clustering must be non-negative")
+        if not 0 <= self.min_component_energy_ratio_for_clustering <= 1:
+            raise ValueError("min_component_energy_ratio_for_clustering must be in [0, 1]")
+        if not 0 <= self.min_component_quality_for_clustering <= 1:
+            raise ValueError("min_component_quality_for_clustering must be in [0, 1]")
+        if self.max_significant_components_before_mixed < 1:
+            raise ValueError("max_significant_components_before_mixed must be at least 1")
+        if not 0 <= self.strict_max_overlap_ratio_for_split <= 1:
+            raise ValueError("strict_max_overlap_ratio_for_split must be in [0, 1]")
+        if not 0 <= self.min_component_compactness <= 1:
+            raise ValueError("min_component_compactness must be in [0, 1]")
+        if not 0 <= self.min_clusterable_detection_score <= 1:
+            raise ValueError("min_clusterable_detection_score must be in [0, 1]")
         if not 0 <= self.min_eventness_for_clustering <= 1:
             raise ValueError("min_eventness_for_clustering must be in [0, 1]")
         if not 0 <= self.min_component_eventness_for_clustering <= 1:
